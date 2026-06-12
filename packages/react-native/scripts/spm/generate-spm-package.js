@@ -304,6 +304,19 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
     const xcfwLinksDir = path.join(appRoot, 'build', 'xcframeworks');
     fs.mkdirSync(xcfwLinksDir, {recursive: true});
 
+    // ZERO-I SPIKE: when the repackaged artifact (natural-layout headers
+    // inside React.framework) exists, React resolves to it instead of the
+    // cache slot — this keeps every re-sync (incl. the Xcode build phase)
+    // pointing at the zero-I artifact instead of silently reverting it.
+    const zeroIReactXcfw = path.resolve(
+      __dirname,
+      '..',
+      '..',
+      'build',
+      'zero-i',
+      'React.xcframework',
+    );
+
     const names /*: Array<string> */ = [];
     // $FlowFixMe[incompatible-use] Object.entries values typed as mixed
     for (const [name, entry] of Object.entries(raw)) {
@@ -314,11 +327,39 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
       } catch {
         /* doesn't exist yet */
       }
-      fs.symlinkSync(entry.xcframeworkPath, linkPath);
+      const linkTarget =
+        name === 'React' && fs.existsSync(zeroIReactXcfw)
+          ? zeroIReactXcfw
+          : entry.xcframeworkPath;
+      fs.symlinkSync(linkTarget, linkPath);
       log(
-        `Symlink: build/xcframeworks/${linkName} -> ${displayPath(entry.xcframeworkPath)}`,
+        `Symlink: build/xcframeworks/${linkName} -> ${displayPath(linkTarget)}`,
       );
       names.push(name);
+    }
+
+    // ZERO-I Form 2: the headers-only ReactNativeHeaders library xcframework
+    // joins the package — its binaryTarget auto-serves all non-React
+    // namespace headers (incl. third-party deps) to dependents, no flags.
+    const zeroIHeadersXcfw = path.join(
+      path.dirname(zeroIReactXcfw),
+      'ReactNativeHeaders.xcframework',
+    );
+    if (fs.existsSync(zeroIHeadersXcfw)) {
+      const linkPath = path.join(
+        xcfwLinksDir,
+        'ReactNativeHeaders.xcframework',
+      );
+      try {
+        fs.unlinkSync(linkPath);
+      } catch {
+        /* doesn't exist yet */
+      }
+      fs.symlinkSync(zeroIHeadersXcfw, linkPath);
+      log(
+        `Symlink: build/xcframeworks/ReactNativeHeaders.xcframework -> ${displayPath(zeroIHeadersXcfw)}`,
+      );
+      names.push('ReactNativeHeaders');
     }
 
     // Pass the absolute artifacts dir so the binary target paths reference the

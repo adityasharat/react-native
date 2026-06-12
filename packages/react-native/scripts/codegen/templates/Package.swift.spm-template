@@ -23,6 +23,7 @@ struct RNSpmPaths: Decodable {
     let appRoot: String
     let rnCoreHeaders: String
     let appHeaders: String
+    let zeroIFrameworks: String? // ZERO-I SPIKE: namespace-frameworks dir ("" = off)
 }
 let rnSpmPaths: RNSpmPaths = {
     let url = URL(fileURLWithPath: packageDir + "/../autolinking/spm-paths.json").standardized
@@ -39,6 +40,19 @@ let rnSpmPaths: RNSpmPaths = {
 let appRoot = rnSpmPaths.appRoot
 let rnCoreHeaders = rnSpmPaths.rnCoreHeaders
 let appHeaders = rnSpmPaths.appHeaders
+let zeroI = !(rnSpmPaths.zeroIFrameworks ?? "").isEmpty
+// ZERO-I (Option B + Form 2): React core resolves via the React binaryTarget
+// (-F auto) + the ReactNativeHeaders binaryTarget (auto header serving) — the
+// only remaining -I is the app's own generated headers.
+let rnHeaderCFlags: [String] = zeroI
+    ? ["-I", appHeaders]
+    : ["-I", rnCoreHeaders, "-I", appHeaders]
+let rnHeaderCxxFlags: [String] = zeroI
+    ? rnHeaderCFlags
+    : ["-fno-implicit-module-maps", "-I", rnCoreHeaders, "-I", appHeaders]
+let zeroIHeadersDep: [Target.Dependency] = zeroI
+    ? [.product(name: "ReactNativeHeaders", package: "ReactNative")]
+    : []
 
 let package = Package(
     name: "React-GeneratedCode",
@@ -60,13 +74,13 @@ let package = Package(
             dependencies: [
                 .product(name: "ReactNative", package: "ReactNative"),
                 .product(name: "ReactNativeDependencies", package: "ReactNative"),
-            ],
+            ] + zeroIHeadersDep,
             path: "ReactCodegen",
             exclude: ["ReactCodegen.podspec"],
             publicHeadersPath: ".",
             cSettings: [
                 .headerSearchPath("headers"),
-                .unsafeFlags(["-I", rnCoreHeaders, "-I", appHeaders]),
+                .unsafeFlags(rnHeaderCFlags),
             ],
             cxxSettings: [
                 .headerSearchPath("headers"),
@@ -74,7 +88,7 @@ let package = Package(
                 // -fno-implicit-module-maps prevents clang from matching <react/...> to
                 // React.framework (case-insensitive) in the build products dir, allowing
                 // -I to resolve the C++ headers from the merged tree correctly.
-                .unsafeFlags(["-fno-implicit-module-maps", "-I", rnCoreHeaders, "-I", appHeaders]),
+                .unsafeFlags(rnHeaderCxxFlags),
             ],
             linkerSettings: [
                 .linkedFramework("Foundation")
@@ -82,20 +96,20 @@ let package = Package(
         ),
         .target(
             name: "ReactAppDependencyProvider",
-            dependencies: ["ReactCodegen"],
+            dependencies: ["ReactCodegen"] + zeroIHeadersDep,
             path: "ReactAppDependencyProvider",
             exclude: ["ReactAppDependencyProvider.podspec"],
             publicHeadersPath: ".",
             cSettings: [
                 .headerSearchPath(".."),
                 .headerSearchPath("headers"),
-                .unsafeFlags(["-I", rnCoreHeaders, "-I", appHeaders]),
+                .unsafeFlags(rnHeaderCFlags),
             ],
             cxxSettings: [
                 .headerSearchPath(".."),
                 .headerSearchPath("headers"),
                 .unsafeFlags(["-std=c++20"]),
-                .unsafeFlags(["-fno-implicit-module-maps", "-I", rnCoreHeaders, "-I", appHeaders]),
+                .unsafeFlags(rnHeaderCxxFlags),
             ],
             linkerSettings: [
                 .linkedFramework("Foundation")

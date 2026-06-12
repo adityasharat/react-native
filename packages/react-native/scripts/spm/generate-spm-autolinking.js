@@ -63,12 +63,25 @@ const {
   reactHeaderCxxFlags,
   renderRNPathsLoader,
   toSwiftName,
+  zeroIActive,
 } = require('./spm-utils');
 const fs = require('fs');
 const path = require('path');
 const yargs = require('yargs');
 
 const {log} = makeLogger('generate-spm-autolinking');
+
+// ZERO-I Form 2: targets compiling against React also depend on the
+// ReactNativeHeaders product (headers-only binaryTarget) so SPM auto-serves
+// the non-React namespace headers — replacing the RN-core -I.
+function reactProductDeps() /*: string */ {
+  return (
+    '.product(name: "ReactNative", package: "ReactNative")' +
+    (zeroIActive()
+      ? ', .product(name: "ReactNativeHeaders", package: "ReactNative")'
+      : '')
+  );
+}
 
 function parseArgs(argv /*: Array<string> */) /*: AutolinkingArgs */ {
   const parsed = yargs(argv)
@@ -673,7 +686,7 @@ function generateAutolinkedPackageSwift(
         : '';
     return `        .target(
             name: "${t.name}",
-            dependencies: [.product(name: "ReactNative", package: "ReactNative")],
+            dependencies: [${reactProductDeps()}],
             path: "${t.path}",${excludeLine}${publicHeadersLine}${resourcesLine}${cSettingsLine}${cxxSettingsLine}
             linkerSettings: [.linkedFramework("UIKit"), .linkedFramework("Foundation"), .linkedFramework("CoreGraphics")]
         )`;
@@ -784,7 +797,7 @@ function generateSynthPackageSwift(spec /*: SynthPackageSpec */) /*: string */ {
   // Target dependencies — products from each declared package dep.
   const targetDeps /*: Array<string> */ = [];
   if (hasReactDep) {
-    targetDeps.push('.product(name: "ReactNative", package: "ReactNative")');
+    targetDeps.push(reactProductDeps());
   }
   for (const dep of spmDependencies) {
     targetDeps.push(

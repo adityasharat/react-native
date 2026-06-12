@@ -220,14 +220,28 @@ const PER_APP_HEADERS_REL = 'build/xcframeworks/ReactAppHeaders';
 const SCAFFOLDER_MARKER =
   '// AUTO-SCAFFOLDED by react-native spm scaffold — safe to edit & commit via patch-package.';
 
+// ZERO-I (Option B + Form 2, the decided target): when the repackaged
+// artifacts exist (React.xcframework with the spec layout + the
+// ReactNativeHeaders headers-only library xcframework), React core resolves
+// via the React binaryTarget's auto `-F` and ReactNativeHeaders' auto header
+// serving — NO search-path flags for the React surface at all. Only the
+// per-app codegen/autolinking `-I` (appHeaders) remains — it is the app's own
+// generated code, not the React surface. Activation is generation-time and
+// file-based (build/zero-i present) so generated manifests stay deterministic.
+const ZERO_I_DIR = path.resolve(__dirname, '..', '..', 'build', 'zero-i');
+function zeroIActive() /*: boolean */ {
+  return fs.existsSync(path.join(ZERO_I_DIR, 'React.xcframework'));
+}
+
 function reactHeaderCFlags() /*: Array<string> */ {
-  return ['"-I", rnCoreHeaders, "-I", appHeaders'];
+  return zeroIActive()
+    ? ['"-I", appHeaders']
+    : ['"-I", rnCoreHeaders, "-I", appHeaders'];
 }
 function reactHeaderCxxFlags() /*: Array<string> */ {
-  return [
-    '"-fno-implicit-module-maps"',
-    '"-I", rnCoreHeaders, "-I", appHeaders',
-  ];
+  return zeroIActive()
+    ? ['"-I", appHeaders']
+    : ['"-fno-implicit-module-maps"', '"-I", rnCoreHeaders, "-I", appHeaders'];
 }
 
 // Absolute on-disk locations of the two header trees. Centralized so the tree
@@ -288,6 +302,7 @@ struct RNSpmPaths: Decodable {
     let appRoot: String
     let rnCoreHeaders: String
     let appHeaders: String
+    let zeroIFrameworks: String? // ZERO-I SPIKE: namespace-frameworks dir ("" = off)
 }
 let rnSpmPaths: RNSpmPaths = {
     let url = URL(fileURLWithPath: packageDir + "/${rel}spm-paths.json").standardized
@@ -303,7 +318,17 @@ let rnSpmPaths: RNSpmPaths = {
 }()
 let appRoot = rnSpmPaths.appRoot
 let rnCoreHeaders = rnSpmPaths.rnCoreHeaders
-let appHeaders = rnSpmPaths.appHeaders`;
+let appHeaders = rnSpmPaths.appHeaders
+let zeroI = !(rnSpmPaths.zeroIFrameworks ?? "").isEmpty
+// ZERO-I (Option B + Form 2): React core resolves via the React binaryTarget
+// (-F auto) + the ReactNativeHeaders binaryTarget (auto header serving) — the
+// only remaining -I is the app's own generated headers.
+let rnHeaderCFlags: [String] = zeroI
+    ? ["-I", appHeaders]
+    : ["-I", rnCoreHeaders, "-I", appHeaders]
+let rnHeaderCxxFlags: [String] = zeroI
+    ? rnHeaderCFlags
+    : ["-fno-implicit-module-maps", "-I", rnCoreHeaders, "-I", appHeaders]`;
 }
 
 /**
@@ -618,6 +643,9 @@ function writeAppPathsJson(
     appRoot,
     rnCoreHeaders: sharedHeadersDir(projectRoot, slotVersion),
     appHeaders: perAppHeadersDir(appRoot),
+    // ZERO-I (Option B + Form 2): non-empty = zero-I active; generated
+    // manifests then drop the RN-core -I (see renderRNPathsLoader).
+    zeroIFrameworks: zeroIActive() ? ZERO_I_DIR : '',
     // The generated ReactNative binary-target package (React/Hermes/deps
     // xcframeworks). Provided so consumer manifests can `.package(path:)` it
     // without hardcoding the build/xcframeworks layout.
@@ -763,6 +791,7 @@ module.exports = {
   renderRNPathsLoader,
   reactHeaderCFlags,
   reactHeaderCxxFlags,
+  zeroIActive,
   installSpmCodegenTemplate,
   runCodegenAndInstallTemplate,
   SCAFFOLDER_MARKER,
