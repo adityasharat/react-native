@@ -14,8 +14,8 @@
  * For every shipped header the ecosystem actually demands (union of the
  * header-usage manifests), generate a one-line consumer TU and compile it
  * against the repackaged artifact with ZERO -I flags — only -F into the
- * xcframework slice (React.framework) and the namespace frameworks
- * (folly.framework, ...). Bucket decides the compile mode:
+ * xcframework slice (React.framework) plus the simulated auto -I into
+ * ReactNativeHeaders' Headers. Bucket decides the compile mode:
  *   objc-modular-candidate -> plain ObjC (.m)
  *   everything else        -> ObjC++ (.mm, c++20)
  *
@@ -40,19 +40,10 @@ function readJson(p /*: string */) /*: any */ {
   return JSON.parse(fs.readFileSync(p, 'utf8'));
 }
 
-function includeFormFor(
-  naturalPath /*: string */,
-  optionB /*: boolean */,
-) /*: string */ {
-  if (!optionB) {
-    // Option A: everything is a React.framework subpath.
-    return naturalPath.startsWith('React/')
-      ? naturalPath
-      : `React/${naturalPath}`;
-  }
-  // Option B: ORIGINAL include forms — namespace frameworks + case-unified
-  // React.framework serve them unchanged. Bare aliases have no framework
-  // spelling; they use the (tiny, accepted) <React/X> migration form.
+function includeFormFor(naturalPath /*: string */) /*: string */ {
+  // ORIGINAL include forms — the spec layout serves them unchanged. Bare
+  // aliases have no framework spelling; they use the (tiny, accepted)
+  // <React/X> migration form.
   return naturalPath.includes('/') ? naturalPath : `React/${naturalPath}`;
 }
 
@@ -66,12 +57,6 @@ async function main() /*: Promise<void> */ {
     getFlag('--zero-i') ?? path.join(RN_ROOT, 'build', 'zero-i'),
   );
   const probeAll = argv.includes('--all');
-  // Option B detection: the spike marker, or (production artifacts, which
-  // carry no markers) the presence of ReactNativeHeaders.xcframework — the
-  // Form 2 artifact only exists under the Option B layout.
-  const optionB =
-    fs.existsSync(path.join(zeroIDir, 'OPTION_B')) ||
-    fs.existsSync(path.join(zeroIDir, 'ReactNativeHeaders.xcframework'));
 
   const inventory = readJson(
     path.join(RN_ROOT, 'build', 'header-inventory.json'),
@@ -93,11 +78,10 @@ async function main() /*: Promise<void> */ {
     ? inventory.headers.map(h => h.naturalPath)
     : Array.from(demanded).sort();
 
-  // -F: the simulator slice (so React.framework is found). Under Form 2 the
-  // second search root is ReactNativeHeaders' Headers dir — passed as -I here
-  // ONLY to simulate what Xcode/SPM auto-add for the binaryTarget (the
-  // consumer manifests carry no flag). Under Option A it is the loose
-  // namespace-frameworks dir via -F.
+  // -F: the simulator slice (so React.framework is found). The second search
+  // root is ReactNativeHeaders' Headers dir — passed as -I here ONLY to
+  // simulate what Xcode/SPM auto-add for the binaryTarget (the consumer
+  // manifests carry no flag).
   const sliceDir = path.join(
     zeroIDir,
     'React.xcframework',
@@ -109,10 +93,7 @@ async function main() /*: Promise<void> */ {
     'ios-arm64_x86_64-simulator',
     'Headers',
   );
-  const nfwDir = path.join(zeroIDir, 'Frameworks');
-  const secondRoot = fs.existsSync(rnhHeaders)
-    ? ['-I', rnhHeaders]
-    : ['-F', nfwDir];
+  const secondRoot = ['-I', rnhHeaders];
   const sdkPath = require('child_process')
     .execSync('xcrun --sdk iphonesimulator --show-sdk-path')
     .toString()
@@ -139,11 +120,11 @@ async function main() /*: Promise<void> */ {
       const objc = bucket === 'objc-modular-candidate';
       const tu = path.join(
         tmpDir,
-        naturalPath.replace(/[\/+]/g, '_') + (objc ? '.m' : '.mm'),
+        naturalPath.replace(/[/+]/g, '_') + (objc ? '.m' : '.mm'),
       );
       fs.writeFileSync(
         tu,
-        `#${objc ? 'import' : 'include'} <${includeFormFor(naturalPath, optionB)}>\n`,
+        `#${objc ? 'import' : 'include'} <${includeFormFor(naturalPath)}>\n`,
       );
       const args = [
         ...baseArgs,
