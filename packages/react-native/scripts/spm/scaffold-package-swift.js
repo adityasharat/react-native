@@ -38,11 +38,7 @@ import type {
 const {defaultReadConfig} = require('./expand-spm-dependencies');
 const {expandSpmSourceGlobs} = require('./generate-spm-autolinking');
 const {readPodspec} = require('./read-podspec');
-const {
-  SCAFFOLDER_MARKER,
-  makeLogger,
-  toSwiftName,
-} = require('./spm-utils');
+const {SCAFFOLDER_MARKER, makeLogger, toSwiftName} = require('./spm-utils');
 const fs = require('fs');
 const path = require('path');
 
@@ -62,13 +58,17 @@ const {log} = makeLogger('scaffold-package-swift');
 // rejects with "Swift tools version 3.1.0 ... no longer supported". v4: the
 // single `let rnHeaders = appRoot + "/.../ReactHeadersAll"` split into the two
 // `rnCoreHeaders` / `appHeaders` lets (merged tree replaced by two trees), so
-// pre-v4 scaffolds reference a tree that is no longer materialized.
+// pre-v4 scaffolds reference a tree that is no longer materialized. v5:
+// header resolution moved to product dependencies (ReactNativeHeaders +
+// ReactAppHeaders binary/headers targets) — the rnCoreHeaders/appHeaders
+// trees no longer exist, so pre-v5 scaffolds carry dead lets and would break
+// if anything still referenced them.
 //
 // Skip-rule contract: when an existing file's version is < this constant,
 // the scaffolder regenerates regardless of --force (the bump implies the
 // existing file is broken under current tooling). A file with the marker
 // but no version line is treated as v1.
-const SCAFFOLDER_VERSION = 4;
+const SCAFFOLDER_VERSION = 5;
 const SCAFFOLDER_VERSION_LINE_RE = /^\/\/ AUTO-SCAFFOLDED-VERSION: (\d+)$/m;
 
 const AUTOGEN_MARKER =
@@ -388,6 +388,19 @@ function emitScaffoldedPackageSwift(
       ? `\n            dependencies: [${targetDeps.join(', ')}],`
       : '';
 
+  // The siblingPath helper is only emitted when sibling deps reference it.
+  const siblingPathHelper =
+    spec.siblingNames.length > 0
+      ? `// Compute the on-disk path to a sibling autolinked dep (same node_modules
+// root as this package). Used by .package(path:) below.
+func siblingPath(_ name: String) -> String {
+    let parent = URL(fileURLWithPath: packageDir).deletingLastPathComponent().path
+    return parent + "/" + name
+}
+
+`
+      : '';
+
   return `// swift-tools-version: 6.0
 ${SCAFFOLDER_MARKER}
 // AUTO-SCAFFOLDED-VERSION: ${SCAFFOLDER_VERSION}${slotComment}
@@ -423,21 +436,7 @@ let appRoot: String = {
     }
 }()
 
-// Two header search-path roots under the consuming app's build/xcframeworks/.
-// ReactCoreHeaders is a per-app symlink into the repo-root shared RN-core/deps
-// tree; ReactAppHeaders is this app's codegen/autolinking tree. Both written by
-// \`npx react-native spm\`.
-let rnCoreHeaders = appRoot + "/build/xcframeworks/ReactCoreHeaders"
-let appHeaders = appRoot + "/build/xcframeworks/ReactAppHeaders"
-
-// Compute the on-disk path to a sibling autolinked dep (same node_modules
-// root as this package). Used by .package(path:) below.
-func siblingPath(_ name: String) -> String {
-    let parent = URL(fileURLWithPath: packageDir).deletingLastPathComponent().path
-    return parent + "/" + name
-}
-
-let package = Package(
+${siblingPathHelper}let package = Package(
     name: "${spec.swiftName}",
     platforms: [.iOS(.v15)],
     products: [
