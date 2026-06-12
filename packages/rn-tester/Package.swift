@@ -44,15 +44,17 @@ do {
     }
 }
 
-let xcfwHeaders = URL(fileURLWithPath: packageDir + "/build/xcframeworks/React.xcframework")
-    .resolvingSymlinksInPath().path + "/Headers"
-let depsHeaders = URL(fileURLWithPath: packageDir + "/build/xcframeworks/ReactNativeDependencies.xcframework")
-    .resolvingSymlinksInPath().path + "/Headers"
-let vfsOverlay = packageDir + "/build/xcframeworks/React-VFS.yaml"
+// ZERO-I (Option B + Form 2): React core headers resolve with NO search-path
+// flags at all — the React binaryTarget's auto -F serves `<React/...>` and
+// `<react/...>` (headers + module map live inside the framework), and the
+// ReactNativeHeaders binaryTarget auto-serves every other namespace
+// (<jsi/...>, <ReactCommon/...>, <yoga/...>, <folly/...>, ...). The ONLY
+// remaining -I is the app's own generated headers (codegen/autolinking).
+let appHeaders = packageDir + "/build/xcframeworks/ReactAppHeaders"
 
-let cFlags: [String] = ["-ivfsoverlay", vfsOverlay, "-I", xcfwHeaders]
-let cxxFlags: [String] = cFlags + ["-I", depsHeaders]
-let swiftFlags: [String] = ["-Xcc", "-ivfsoverlay", "-Xcc", vfsOverlay, "-Xcc", "-I", "-Xcc", xcfwHeaders]
+let cFlags: [String] = ["-I", appHeaders]
+let cxxFlags: [String] = cFlags
+let swiftFlags: [String] = []
 
 let package = Package(
     name: "RNTester",
@@ -71,6 +73,7 @@ let package = Package(
             name: "RNTesterApp",
             dependencies: [
                 .product(name: "ReactNative", package: "ReactNative"),
+                .product(name: "ReactNativeHeaders", package: "ReactNative"),
                 .product(name: "ReactNativeDependencies", package: "ReactNative"),
                 .product(name: "hermes-engine", package: "ReactNative"),
                 .product(name: "Autolinked", package: "Autolinked"),

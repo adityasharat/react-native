@@ -5,8 +5,10 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-#import <RCTDefaultReactNativeFactoryDelegate.h>
-#import <RCTReactNativeFactory.h>
+// ZERO-I OPTION B: bare angle includes have no framework spelling — these two
+// lines are the only consumer migration rn-tester needs under Option B.
+#import <React/RCTDefaultReactNativeFactoryDelegate.h>
+#import <React/RCTReactNativeFactory.h>
 #import <UIKit/UIKit.h>
 
 @interface AppDelegate : RCTDefaultReactNativeFactoryDelegate <UIApplicationDelegate>

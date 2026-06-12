@@ -381,9 +381,6 @@
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/build/generated/autolinking/headers",
-					"$(SRCROOT)/build/xcframeworks/React.xcframework/Headers",
-					"$(SRCROOT)/build/xcframeworks/React.xcframework/Headers/React_RCTAppDelegate",
-					"$(SRCROOT)/build/xcframeworks/ReactNativeDependencies.xcframework/Headers",
 				);
 				INFOPLIST_FILE = "$(SRCROOT)/RNTester/Info.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 15;
@@ -394,8 +391,6 @@
 				);
 				OTHER_CFLAGS = (
 					"$(inherited)",
-					"-ivfsoverlay",
-					"$(DERIVED_FILE_DIR)/React-VFS.yaml",
 				);
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -403,10 +398,6 @@
 				);
 				OTHER_SWIFT_FLAGS = (
 					"$(inherited)",
-					"-Xcc",
-					"-ivfsoverlay",
-					"-Xcc",
-					"$(DERIVED_FILE_DIR)/React-VFS.yaml",
 					"-Xcc",
 					"-fmodule-map-file=$(BUILT_PRODUCTS_DIR)/React.framework/Modules/module.modulemap",
 				);
@@ -428,9 +419,6 @@
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/build/generated/autolinking/headers",
-					"$(SRCROOT)/build/xcframeworks/React.xcframework/Headers",
-					"$(SRCROOT)/build/xcframeworks/React.xcframework/Headers/React_RCTAppDelegate",
-					"$(SRCROOT)/build/xcframeworks/ReactNativeDependencies.xcframework/Headers",
 				);
 				INFOPLIST_FILE = "$(SRCROOT)/RNTester/Info.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 15;
@@ -441,8 +429,6 @@
 				);
 				OTHER_CFLAGS = (
 					"$(inherited)",
-					"-ivfsoverlay",
-					"$(DERIVED_FILE_DIR)/React-VFS.yaml",
 				);
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -450,10 +436,6 @@
 				);
 				OTHER_SWIFT_FLAGS = (
 					"$(inherited)",
-					"-Xcc",
-					"-ivfsoverlay",
-					"-Xcc",
-					"$(DERIVED_FILE_DIR)/React-VFS.yaml",
 					"-Xcc",
 					"-fmodule-map-file=$(BUILT_PRODUCTS_DIR)/React.framework/Modules/module.modulemap",
 				);
