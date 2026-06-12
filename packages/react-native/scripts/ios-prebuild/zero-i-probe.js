@@ -66,12 +66,12 @@ async function main() /*: Promise<void> */ {
     getFlag('--zero-i') ?? path.join(RN_ROOT, 'build', 'zero-i'),
   );
   const probeAll = argv.includes('--all');
-  const optionB = fs.existsSync(
-    path.join(
-      getFlag('--zero-i') ?? path.join(RN_ROOT, 'build', 'zero-i'),
-      'OPTION_B',
-    ),
-  );
+  // Option B detection: the spike marker, or (production artifacts, which
+  // carry no markers) the presence of ReactNativeHeaders.xcframework — the
+  // Form 2 artifact only exists under the Option B layout.
+  const optionB =
+    fs.existsSync(path.join(zeroIDir, 'OPTION_B')) ||
+    fs.existsSync(path.join(zeroIDir, 'ReactNativeHeaders.xcframework'));
 
   const inventory = readJson(
     path.join(RN_ROOT, 'build', 'header-inventory.json'),
