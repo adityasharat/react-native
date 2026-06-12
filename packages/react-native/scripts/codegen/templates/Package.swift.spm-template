@@ -42,17 +42,47 @@ let rnCoreHeaders = rnSpmPaths.rnCoreHeaders
 let appHeaders = rnSpmPaths.appHeaders
 let zeroI = !(rnSpmPaths.zeroIFrameworks ?? "").isEmpty
 // ZERO-I (Option B + Form 2): React core resolves via the React binaryTarget
-// (-F auto) + the ReactNativeHeaders binaryTarget (auto header serving) — the
-// only remaining -I is the app's own generated headers.
+// (-F auto), the ReactNativeHeaders binaryTarget (auto header serving), and
+// the ReactAppHeaders target below (per-app generated headers) — NO flags.
 let rnHeaderCFlags: [String] = zeroI
-    ? ["-I", appHeaders]
+    ? []
     : ["-I", rnCoreHeaders, "-I", appHeaders]
 let rnHeaderCxxFlags: [String] = zeroI
-    ? rnHeaderCFlags
+    ? []
     : ["-fno-implicit-module-maps", "-I", rnCoreHeaders, "-I", appHeaders]
 let zeroIHeadersDep: [Target.Dependency] = zeroI
-    ? [.product(name: "ReactNativeHeaders", package: "ReactNative")]
+    ? [.product(name: "ReactNativeHeaders", package: "ReactNative"), "ReactAppHeaders"]
     : []
+// ZERO-I: the per-app generated-headers farm (built by spm sync at
+// <pkg>/ReactAppHeaders) vended as a normal SPM headers target, replacing the
+// appHeaders -I. Consumers depend on the ReactAppHeaders product.
+let zeroIHeadersTargets: [Target] = zeroI
+    ? [
+        .target(
+            name: "ReactAppHeaders",
+            path: "ReactAppHeaders",
+            publicHeadersPath: "."
+        ),
+    ]
+    : []
+let zeroIHeadersProducts: [Product] = zeroI
+    ? [.library(name: "ReactAppHeaders", targets: ["ReactAppHeaders"])]
+    : []
+// Zero-I needs no flags at all (std comes from cxxLanguageStandard below);
+// the legacy path keeps its unsafeFlags. Built here so zero-I manifests are
+// textually unsafeFlags-free (publishable-package requirement).
+let codegenCSettings: [CSetting] = zeroI
+    ? [.headerSearchPath("headers")]
+    : [.headerSearchPath("headers"), .unsafeFlags(rnHeaderCFlags)]
+let codegenCxxSettings: [CXXSetting] = zeroI
+    ? [.headerSearchPath("headers")]
+    : [.headerSearchPath("headers"), .unsafeFlags(["-std=c++20"]), .unsafeFlags(rnHeaderCxxFlags)]
+let radpCSettings: [CSetting] = zeroI
+    ? [.headerSearchPath(".."), .headerSearchPath("headers")]
+    : [.headerSearchPath(".."), .headerSearchPath("headers"), .unsafeFlags(rnHeaderCFlags)]
+let radpCxxSettings: [CXXSetting] = zeroI
+    ? [.headerSearchPath(".."), .headerSearchPath("headers")]
+    : [.headerSearchPath(".."), .headerSearchPath("headers"), .unsafeFlags(["-std=c++20"]), .unsafeFlags(rnHeaderCxxFlags)]
 
 let package = Package(
     name: "React-GeneratedCode",
@@ -64,7 +94,7 @@ let package = Package(
         .library(
             name: "ReactAppDependencyProvider",
             targets: ["ReactAppDependencyProvider"]),
-    ],
+    ] + zeroIHeadersProducts,
     dependencies: [
         .package(name: "ReactNative", path: "../../xcframeworks"),
     ],
@@ -78,18 +108,8 @@ let package = Package(
             path: "ReactCodegen",
             exclude: ["ReactCodegen.podspec"],
             publicHeadersPath: ".",
-            cSettings: [
-                .headerSearchPath("headers"),
-                .unsafeFlags(rnHeaderCFlags),
-            ],
-            cxxSettings: [
-                .headerSearchPath("headers"),
-                .unsafeFlags(["-std=c++20"]),
-                // -fno-implicit-module-maps prevents clang from matching <react/...> to
-                // React.framework (case-insensitive) in the build products dir, allowing
-                // -I to resolve the C++ headers from the merged tree correctly.
-                .unsafeFlags(rnHeaderCxxFlags),
-            ],
+            cSettings: codegenCSettings,
+            cxxSettings: codegenCxxSettings,
             linkerSettings: [
                 .linkedFramework("Foundation")
             ]
@@ -100,22 +120,13 @@ let package = Package(
             path: "ReactAppDependencyProvider",
             exclude: ["ReactAppDependencyProvider.podspec"],
             publicHeadersPath: ".",
-            cSettings: [
-                .headerSearchPath(".."),
-                .headerSearchPath("headers"),
-                .unsafeFlags(rnHeaderCFlags),
-            ],
-            cxxSettings: [
-                .headerSearchPath(".."),
-                .headerSearchPath("headers"),
-                .unsafeFlags(["-std=c++20"]),
-                .unsafeFlags(rnHeaderCxxFlags),
-            ],
+            cSettings: radpCSettings,
+            cxxSettings: radpCxxSettings,
             linkerSettings: [
                 .linkedFramework("Foundation")
             ]
         )
-    ],
+    ] + zeroIHeadersTargets,
     // React Native headers require C++20 (concepts, std::optional, etc.)
     cxxLanguageStandard: .cxx20
 )

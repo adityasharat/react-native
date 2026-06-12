@@ -44,17 +44,12 @@ do {
     }
 }
 
-// ZERO-I (Option B + Form 2): React core headers resolve with NO search-path
-// flags at all — the React binaryTarget's auto -F serves `<React/...>` and
-// `<react/...>` (headers + module map live inside the framework), and the
-// ReactNativeHeaders binaryTarget auto-serves every other namespace
-// (<jsi/...>, <ReactCommon/...>, <yoga/...>, <folly/...>, ...). The ONLY
-// remaining -I is the app's own generated headers (codegen/autolinking).
-let appHeaders = packageDir + "/build/xcframeworks/ReactAppHeaders"
-
-let cFlags: [String] = ["-I", appHeaders]
-let cxxFlags: [String] = cFlags
-let swiftFlags: [String] = []
+// ZERO-I (Option B + Form 2): NO search-path flags at all. React core comes
+// from the React binaryTarget (auto -F; headers + module map inside the
+// framework), every other namespace (<jsi/...>, <ReactCommon/...>,
+// <yoga/...>, <folly/...>) from the ReactNativeHeaders binaryTarget, and the
+// app's own generated headers from the ReactAppHeaders product (codegen
+// package) — all auto-served by SPM via the product dependencies below.
 
 let package = Package(
     name: "RNTester",
@@ -79,12 +74,13 @@ let package = Package(
                 .product(name: "Autolinked", package: "Autolinked"),
                 .product(name: "ReactCodegen", package: "React-GeneratedCode"),
                 .product(name: "ReactAppDependencyProvider", package: "React-GeneratedCode"),
+                .product(name: "ReactAppHeaders", package: "React-GeneratedCode"),
             ],
             path: "RNTester",
             exclude: ["SwiftTest.swift", "main.m", "Info.plist", "Images.xcassets", "LaunchScreen.storyboard"],
             publicHeadersPath: ".",
-            cSettings: [.unsafeFlags(cFlags)],
-            cxxSettings: [.unsafeFlags(cxxFlags)]
+            cSettings: [],
+            cxxSettings: []
         ),
         // Swift sources in a separate target (SPM does not allow mixed-language targets)
         .target(
@@ -92,7 +88,7 @@ let package = Package(
             dependencies: ["RNTesterApp"],
             path: "RNTester",
             sources: ["SwiftTest.swift"],
-            swiftSettings: [.unsafeFlags(swiftFlags)]
+            swiftSettings: []
         ),
     ],
     cxxLanguageStandard: .cxx20

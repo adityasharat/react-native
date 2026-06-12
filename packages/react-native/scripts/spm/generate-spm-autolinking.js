@@ -78,7 +78,8 @@ function reactProductDeps() /*: string */ {
   return (
     '.product(name: "ReactNative", package: "ReactNative")' +
     (zeroIActive()
-      ? ', .product(name: "ReactNativeHeaders", package: "ReactNative")'
+      ? ', .product(name: "ReactNativeHeaders", package: "ReactNative")' +
+        ', .product(name: "ReactAppHeaders", package: "React-GeneratedCode")'
       : '')
   );
 }
@@ -641,6 +642,11 @@ function generateAutolinkedPackageSwift(
     packageDeps.push(
       `.package(name: "ReactNative", path: "${xcframeworksRelPath}")`,
     );
+    if (zeroIActive()) {
+      // Zero-I: per-app generated headers come from the ReactAppHeaders
+      // product in the codegen package (sibling of the autolinking dir).
+      packageDeps.push(`.package(name: "React-GeneratedCode", path: "../ios")`);
+    }
   }
 
   // AutolinkedAggregate's target dependencies: .product(...) for npm sub-package
@@ -779,6 +785,13 @@ function generateSynthPackageSwift(spec /*: SynthPackageSpec */) /*: string */ {
     packageDeps.push(
       `.package(name: "ReactNative", path: appRoot + "/build/xcframeworks")`,
     );
+    if (zeroIActive()) {
+      // Zero-I: per-app generated headers come from the ReactAppHeaders
+      // product in the codegen package.
+      packageDeps.push(
+        `.package(name: "React-GeneratedCode", path: appRoot + "/build/generated/ios")`,
+      );
+    }
   }
   for (const dep of spmDependencies) {
     const absPath = siblingSynthAbsolutePaths[dep.swiftName];

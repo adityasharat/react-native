@@ -212,7 +212,10 @@ function resolveReactNativeRoot(
 // the framework module copied into the build products dir). The shared `-I`
 // precedes the per-app one to preserve the old single-tree first-wins precedence.
 const SHARED_HEADERS_SUBDIR = 'ReactCoreHeaders';
-const PER_APP_HEADERS_REL = 'build/xcframeworks/ReactAppHeaders';
+// The per-app farm lives INSIDE the codegen package (build/generated/ios) so
+// it can be vended as a normal SPM headers target ("ReactAppHeaders") — under
+// zero-I the farm reaches consumers via SPM product dependencies, not -I.
+const PER_APP_HEADERS_REL = 'build/generated/ios/ReactAppHeaders';
 
 // Marker at the top of a scaffolder-generated Package.swift. Lives here (not in
 // scaffold-package-swift.js) so the autolinker can recognize scaffolded files
@@ -234,13 +237,14 @@ function zeroIActive() /*: boolean */ {
 }
 
 function reactHeaderCFlags() /*: Array<string> */ {
-  return zeroIActive()
-    ? ['"-I", appHeaders']
-    : ['"-I", rnCoreHeaders, "-I", appHeaders'];
+  // Zero-I: NO search-path flags at all. React core comes from the React +
+  // ReactNativeHeaders binaryTargets; the per-app generated headers come from
+  // the ReactAppHeaders SPM target (codegen package) — all auto-served.
+  return zeroIActive() ? [] : ['"-I", rnCoreHeaders, "-I", appHeaders'];
 }
 function reactHeaderCxxFlags() /*: Array<string> */ {
   return zeroIActive()
-    ? ['"-I", appHeaders']
+    ? []
     : ['"-fno-implicit-module-maps"', '"-I", rnCoreHeaders, "-I", appHeaders'];
 }
 
@@ -321,13 +325,13 @@ let rnCoreHeaders = rnSpmPaths.rnCoreHeaders
 let appHeaders = rnSpmPaths.appHeaders
 let zeroI = !(rnSpmPaths.zeroIFrameworks ?? "").isEmpty
 // ZERO-I (Option B + Form 2): React core resolves via the React binaryTarget
-// (-F auto) + the ReactNativeHeaders binaryTarget (auto header serving) — the
-// only remaining -I is the app's own generated headers.
+// (-F auto), the ReactNativeHeaders binaryTarget (auto header serving), and
+// the ReactAppHeaders SPM target (per-app generated headers) — NO flags.
 let rnHeaderCFlags: [String] = zeroI
-    ? ["-I", appHeaders]
+    ? []
     : ["-I", rnCoreHeaders, "-I", appHeaders]
 let rnHeaderCxxFlags: [String] = zeroI
-    ? rnHeaderCFlags
+    ? []
     : ["-fno-implicit-module-maps", "-I", rnCoreHeaders, "-I", appHeaders]`;
 }
 
@@ -566,10 +570,15 @@ function buildPerAppHeaderTree(
   logger /*: {log: (msg: string) => void} */ = {log() {}},
 ) /*: HeaderTreeResult */ {
   const outDir = perAppHeadersDir(appRoot);
+  // Build into a temp sibling, then swap: the farm now lives INSIDE
+  // build/generated/ios (one of the trees being folded), so building in place
+  // would make foldDir walk the half-built farm itself.
+  const tmpDir = outDir + '.tmp';
+  fs.rmSync(tmpDir, {recursive: true, force: true});
   fs.rmSync(outDir, {recursive: true, force: true});
-  fs.mkdirSync(outDir, {recursive: true});
+  fs.mkdirSync(tmpDir, {recursive: true});
 
-  const linker = createHeaderLinker(outDir, logger);
+  const linker = createHeaderLinker(tmpDir, logger);
   linker.foldDir(
     path.join(appRoot, 'build', 'generated', 'autolinking', 'headers'),
   );
@@ -577,6 +586,16 @@ function buildPerAppHeaderTree(
   linker.foldDir(
     path.join(appRoot, 'build', 'generated', 'ios', 'ReactCodegen'),
   );
+
+  // Stub source so the farm is a valid SPM target (vended headers-only —
+  // see the ReactAppHeaders target in the codegen Package.swift template).
+  fs.writeFileSync(
+    path.join(tmpDir, 'ReactAppHeadersStub.c'),
+    '// ReactAppHeaders vends the per-app generated headers; this stub\n' +
+      '// satisfies SPM, which requires at least one source file per target.\n' +
+      'static int ReactAppHeadersStub __attribute__((unused)) = 0;\n',
+  );
+  fs.renameSync(tmpDir, outDir);
 
   logger.log(
     `Built per-app header tree (${linker.seen.size} headers` +
