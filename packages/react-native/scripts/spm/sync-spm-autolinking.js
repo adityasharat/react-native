@@ -153,30 +153,6 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
   // (Re)install the static codegen template now that build/generated/ios is finalized.
   installSpmCodegenTemplate(appRoot, reactNativeRoot, {log});
 
-  // ZERO-I SPIKE: codegen output is emitted with bare natural-path includes
-  // (<ReactCommon/TurboModule.h>); with the zero-I artifact active those must
-  // be framework-form (<React/ReactCommon/TurboModule.h>). Post-process the
-  // generated tree on every sync so a codegen re-run can't revert the spike.
-  // (Production fixes this in the codegen templates themselves.)
-  try {
-    // $FlowFixMe[cannot-resolve-module] spike-only cross-dir require
-    const {codemodDirs} = require('../ios-prebuild/zero-i-codemod');
-    const {zeroIActive} = require('./spm-utils');
-    // Option B (compat-serving layout) serves ORIGINAL include forms via
-    // namespace frameworks — no codegen rewriting wanted.
-    const optionB = fs.existsSync(
-      path.resolve(__dirname, '..', '..', 'build', 'zero-i', 'OPTION_B'),
-    );
-    if (zeroIActive() && !optionB) {
-      const r = codemodDirs([path.join(appRoot, 'build', 'generated', 'ios')]);
-      log(
-        `ZERO-I: codemodded codegen output (${r.linesRewritten} lines in ${r.filesChanged} files)`,
-      );
-    }
-  } catch (e) {
-    log(`ZERO-I codemod skipped: ${e.message}`);
-  }
-
   // Rebuild the split header trees for the current slot, then write the
   // single-source-of-truth path files the generated manifests read at SPM-eval
   // time. Manifest text stays constant; only the JSON + symlink contents change.

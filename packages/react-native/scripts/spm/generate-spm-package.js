@@ -304,67 +304,47 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
     const xcfwLinksDir = path.join(appRoot, 'build', 'xcframeworks');
     fs.mkdirSync(xcfwLinksDir, {recursive: true});
 
-    // ZERO-I SPIKE: when the repackaged artifact (natural-layout headers
-    // inside React.framework) exists, React resolves to it instead of the
-    // cache slot — this keeps every re-sync (incl. the Xcode build phase)
-    // pointing at the zero-I artifact instead of silently reverting it.
-    const zeroIReactXcfw = path.resolve(
-      __dirname,
-      '..',
-      '..',
-      'build',
-      'zero-i',
-      'React.xcframework',
-    );
-
-    const names /*: Array<string> */ = [];
-    // $FlowFixMe[incompatible-use] Object.entries values typed as mixed
-    for (const [name, entry] of Object.entries(raw)) {
-      const linkName = `${name}.xcframework`;
-      const linkPath = path.join(xcfwLinksDir, linkName);
-      try {
-        fs.unlinkSync(linkPath);
-      } catch {
-        /* doesn't exist yet */
-      }
-      const linkTarget =
-        name === 'React' && fs.existsSync(zeroIReactXcfw)
-          ? zeroIReactXcfw
-          : entry.xcframeworkPath;
-      fs.symlinkSync(linkTarget, linkPath);
-      log(
-        `Symlink: build/xcframeworks/${linkName} -> ${displayPath(linkTarget)}`,
+    // ZERO-I (the default): the spec layout (headers-spec.js) is what
+    // consumers compile against. When the slot's artifacts.json already
+    // carries ReactNativeHeaders (published or local tarball via
+    // download-spm-artifacts), the artifacts ship the layout and are used
+    // as-is. Otherwise the layout is COMPOSED locally from the slot's
+    // React + deps artifacts (binaries untouched; headers re-projected) —
+    // fast, marker-cached, re-run safe.
+    const rnPkgRoot = path.resolve(__dirname, '..', '..');
+    const overrides /*: {[string]: string} */ = {};
+    if (raw.ReactNativeHeaders == null) {
+      // $FlowFixMe[cannot-resolve-module] cross-dir require into ios-prebuild
+      const {ensureZeroILayout} = require('../ios-prebuild/zero-i-compose');
+      const composed = ensureZeroILayout(
+        artifactsDir ?? path.dirname(String(raw.React?.xcframeworkPath ?? '')),
+        rnPkgRoot,
+        path.join(rnPkgRoot, 'build', 'zero-i'),
       );
-      names.push(name);
+      overrides.React = composed.reactXcfw;
+      overrides.ReactNativeHeaders = composed.headersXcfw;
     }
 
-    // ZERO-I Form 2: the headers-only ReactNativeHeaders library xcframework
-    // joins the package — its binaryTarget auto-serves all non-React
-    // namespace headers (incl. third-party deps) to dependents, no flags.
-    // Skipped when artifacts.json already provided it (downloaded/local
-    // tarball via download-spm-artifacts) — that entry takes precedence.
-    const zeroIHeadersXcfw = path.join(
-      path.dirname(zeroIReactXcfw),
-      'ReactNativeHeaders.xcframework',
-    );
-    if (
-      !names.includes('ReactNativeHeaders') &&
-      fs.existsSync(zeroIHeadersXcfw)
-    ) {
-      const linkPath = path.join(
-        xcfwLinksDir,
-        'ReactNativeHeaders.xcframework',
-      );
+    const names /*: Array<string> */ = [];
+    const linkOne = (name /*: string */, target /*: string */) => {
+      const linkPath = path.join(xcfwLinksDir, `${name}.xcframework`);
       try {
         fs.unlinkSync(linkPath);
       } catch {
         /* doesn't exist yet */
       }
-      fs.symlinkSync(zeroIHeadersXcfw, linkPath);
+      fs.symlinkSync(target, linkPath);
       log(
-        `Symlink: build/xcframeworks/ReactNativeHeaders.xcframework -> ${displayPath(zeroIHeadersXcfw)}`,
+        `Symlink: build/xcframeworks/${name}.xcframework -> ${displayPath(target)}`,
       );
-      names.push('ReactNativeHeaders');
+      names.push(name);
+    };
+    // $FlowFixMe[incompatible-use] Object.entries values typed as mixed
+    for (const [name, entry] of Object.entries(raw)) {
+      linkOne(name, overrides[name] ?? entry.xcframeworkPath);
+    }
+    if (overrides.ReactNativeHeaders != null) {
+      linkOne('ReactNativeHeaders', overrides.ReactNativeHeaders);
     }
 
     // Pass the absolute artifacts dir so the binary target paths reference the

@@ -214,9 +214,71 @@ function buildReactNativeHeadersXcframework(
   return outXcfw;
 }
 
+/**
+ * Ensures the zero-I layout exists at `outDir`, composed from the cache
+ * slot's artifacts: clones React.xcframework (APFS clonefile), strips the
+ * stale signature (R7 — production signs after compose), emits the spec
+ * layout into every slice, and builds ReactNativeHeaders.xcframework from
+ * the plan + the slot's deps headers.
+ *
+ * Skips when the freshness marker matches the source artifact (same
+ * realpath + Info.plist mtime) unless `force`. This is what makes zero-I the
+ * DEFAULT: any consumer with a cache slot gets composed artifacts
+ * automatically — no published ReactNativeHeaders required.
+ */
+function ensureZeroILayout(
+  artifactsDir /*: string */,
+  rnRoot /*: string */,
+  outDir /*: string */,
+  force /*: boolean */ = false,
+) /*: {reactXcfw: string, headersXcfw: string} */ {
+  const sourceXcfw = fs.realpathSync(
+    path.join(artifactsDir, 'React.xcframework'),
+  );
+  const depsHeaders = path.join(
+    artifactsDir,
+    'ReactNativeDependencies.xcframework',
+    'Headers',
+  );
+  const reactXcfw = path.join(outDir, 'React.xcframework');
+  const headersXcfw = path.join(outDir, 'ReactNativeHeaders.xcframework');
+  const markerPath = path.join(outDir, '.composed-from');
+
+  const sourceStat = fs.statSync(path.join(sourceXcfw, 'Info.plist'));
+  const marker = `${sourceXcfw}\n${sourceStat.mtimeMs}\n`;
+  if (
+    !force &&
+    fs.existsSync(reactXcfw) &&
+    fs.existsSync(headersXcfw) &&
+    fs.existsSync(markerPath) &&
+    fs.readFileSync(markerPath, 'utf8') === marker
+  ) {
+    return {reactXcfw, headersXcfw};
+  }
+
+  console.log(
+    `zero-i-compose: composing layout from ${path.basename(artifactsDir)} slot...`,
+  );
+  fs.rmSync(reactXcfw, {recursive: true, force: true});
+  fs.rmSync(markerPath, {force: true});
+  fs.mkdirSync(outDir, {recursive: true});
+  execSync(`/bin/cp -Rc "${sourceXcfw}" "${reactXcfw}"`);
+  fs.rmSync(path.join(reactXcfw, '_CodeSignature'), {
+    recursive: true,
+    force: true,
+  });
+
+  const plan = computeSpecPlan(rnRoot);
+  emitReactFrameworkHeaders(reactXcfw, plan, rnRoot);
+  buildReactNativeHeadersXcframework(outDir, plan, depsHeaders, rnRoot);
+  fs.writeFileSync(markerPath, marker);
+  return {reactXcfw, headersXcfw};
+}
+
 module.exports = {
   computeSpecPlan,
   emitReactFrameworkHeaders,
   buildReactNativeHeadersXcframework,
+  ensureZeroILayout,
   DEPS_NAMESPACES,
 };
