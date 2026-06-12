@@ -48,10 +48,14 @@
 const {
   DEPS_NAMESPACES,
   planFromInventory,
-  renderNamespaceModuleMap,
   renderReactModuleMap,
   renderUmbrellaHeader,
 } = require('./headers-spec');
+const {
+  buildReactNativeHeadersXcframework,
+  computeSpecPlan,
+  emitReactFrameworkHeaders,
+} = require('./zero-i-compose');
 const {execSync} = require('child_process');
 const fs = require('fs');
 const os = require('os');
@@ -129,74 +133,6 @@ function installIntoSlices(
   console.log(`Installed Headers + module map -> ${slices.join(', ')}`);
 }
 
-/**
- * Builds the Form 2 artifact: a headers-only LIBRARY xcframework with stub
- * static archives (nothing embeds in apps; compile/link no-op) so SPM
- * accepts it as a binaryTarget and auto-serves its Headers to dependents.
- */
-function buildReactNativeHeadersXcframework(
-  outDir /*: string */,
-  headersStage /*: string */,
-) /*: void */ {
-  const work = path.join(outDir, '.stub-work');
-  fs.mkdirSync(work, {recursive: true});
-  fs.writeFileSync(
-    path.join(work, 'stub.c'),
-    '// ReactNativeHeaders is headers-only; this stub satisfies xcframework tooling.\nstatic int RNHeadersStub __attribute__((unused)) = 0;\n',
-  );
-
-  const sdk = (name /*: string */) =>
-    execSync(`xcrun --sdk ${name} --show-sdk-path`).toString().trim();
-  const build = (
-    outLib /*: string */,
-    targets /*: Array<string> */,
-    sdkPath /*: string */,
-  ) => {
-    const objs = targets.map((t, i) => {
-      const obj = path.join(work, `stub-${path.basename(outLib)}-${i}.o`);
-      execSync(
-        `xcrun clang -c -target ${t} -isysroot "${sdkPath}" "${path.join(work, 'stub.c')}" -o "${obj}"`,
-      );
-      return obj;
-    });
-    if (objs.length === 1) {
-      execSync(`xcrun libtool -static -o "${outLib}" "${objs[0]}"`);
-    } else {
-      const thins = objs.map(o => {
-        const lib = o.replace(/\.o$/, '.a');
-        execSync(`xcrun libtool -static -o "${lib}" "${o}"`);
-        return lib;
-      });
-      execSync(
-        `xcrun lipo -create ${thins.map(l => `"${l}"`).join(' ')} -output "${outLib}"`,
-      );
-    }
-  };
-
-  const iosLib = path.join(work, 'libReactNativeHeaders-ios.a');
-  const simLib = path.join(work, 'libReactNativeHeaders-sim.a');
-  build(iosLib, ['arm64-apple-ios15.0'], sdk('iphoneos'));
-  build(
-    simLib,
-    ['arm64-apple-ios15.0-simulator', 'x86_64-apple-ios15.0-simulator'],
-    sdk('iphonesimulator'),
-  );
-
-  const outXcfw = path.join(outDir, 'ReactNativeHeaders.xcframework');
-  fs.rmSync(outXcfw, {recursive: true, force: true});
-  execSync(
-    `xcodebuild -create-xcframework ` +
-      `-library "${iosLib}" -headers "${headersStage}" ` +
-      `-library "${simLib}" -headers "${headersStage}" ` +
-      `-output "${outXcfw}"`,
-    {stdio: 'pipe'},
-  );
-  fs.rmSync(work, {recursive: true, force: true});
-  console.log(
-    `Built ReactNativeHeaders.xcframework (headers-only library, ios + ios-simulator) -> ${outXcfw}`,
-  );
-}
-
 function main() /*: void */ {
   const argv = process.argv.slice(2);
   const getFlag = (name /*: string */) /*: ?string */ => {
@@ -240,57 +176,12 @@ function main() /*: void */ {
   console.log(`Cloned artifact (signature stripped) -> ${outXcfw}`);
 
   if (!optionA) {
-    // ================= OPTION B + FORM 2 (spec-driven) =================
-    const plan = planFromInventory(manifest);
-    if (plan.collisions.length > 0) {
-      for (const c of plan.collisions) {
-        console.error(`SPEC COLLISION (R8): ${c}`);
-      }
-      throw new Error(`${plan.collisions.length} spec collisions — aborting`);
-    }
-
-    // React.framework Headers (R1) + umbrella/module map (R4).
-    const reactStage = path.join(outDir, '.react-stage');
-    fs.mkdirSync(reactStage, {recursive: true});
-    for (const e of plan.react) {
-      const dest = path.join(reactStage, e.relPath);
-      fs.mkdirSync(path.dirname(dest), {recursive: true});
-      fs.copyFileSync(path.join(RN_ROOT, e.source), dest);
-    }
-    fs.writeFileSync(
-      path.join(reactStage, 'React-umbrella.h'),
-      renderUmbrellaHeader(plan.umbrella),
-    );
-    installIntoSlices(outXcfw, reactStage, renderReactModuleMap());
-    fs.rmSync(reactStage, {recursive: true, force: true});
-    console.log(
-      `React.framework: ${plan.react.length} headers (React/ ∪ react/ ∪ bare at root), umbrella ${plan.umbrella.length}`,
-    );
-
-    // ReactNativeHeaders Headers (R2) + namespace modules (R5).
-    const nhStage = path.join(outDir, '.rnh-stage');
-    fs.mkdirSync(nhStage, {recursive: true});
-    for (const e of plan.reactNativeHeaders) {
-      const dest = path.join(nhStage, e.relPath);
-      fs.mkdirSync(path.dirname(dest), {recursive: true});
-      fs.copyFileSync(path.join(RN_ROOT, e.source), dest);
-    }
-    for (const ns of plan.depsNamespaces) {
-      const src = path.join(depsHeaders, ns);
-      if (fs.existsSync(src)) {
-        execSync(`/bin/cp -Rc "${src}" "${path.join(nhStage, ns)}"`);
-      }
-    }
-    fs.writeFileSync(
-      path.join(nhStage, 'module.modulemap'),
-      renderNamespaceModuleMap(plan.namespaceModules),
-    );
-    buildReactNativeHeadersXcframework(outDir, nhStage);
-    fs.rmSync(nhStage, {recursive: true, force: true});
-    console.log(
-      `ReactNativeHeaders: ${plan.reactNativeHeaders.length} RN headers + deps namespaces (${plan.depsNamespaces.join(', ')}), ` +
-        `${Object.keys(plan.namespaceModules).length} namespace modules (${Object.keys(plan.namespaceModules).sort().join(', ')})`,
-    );
+    // ============ OPTION B + FORM 2 (shared spec-driven emission) ============
+    // Same code path the real prebuild compose uses (zero-i-compose.js) —
+    // this script just applies it to a cached artifact instead of a fresh one.
+    const plan = computeSpecPlan(RN_ROOT);
+    emitReactFrameworkHeaders(outXcfw, plan, RN_ROOT);
+    buildReactNativeHeadersXcframework(outDir, plan, depsHeaders, RN_ROOT);
 
     // Marker: layout-aware tooling (sync codemod hook, probe) keys off this.
     fs.writeFileSync(

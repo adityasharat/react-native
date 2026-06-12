@@ -81,7 +81,7 @@ type HeaderEntry = {
 
 // Third-party C++ libraries that RN's public headers re-expose (Tier 3 of the
 // modularization doc). Keyed by the first include-path segment.
-const THIRD_PARTY_LIBS = new Set([
+const THIRD_PARTY_LIBS /*: Set<string> */ = new Set([
   'folly',
   'boost',
   'fmt',
@@ -215,7 +215,7 @@ function scanHeader(text /*: string */) /*: {
 
 // Meta-internal headers referenced behind RN_DISABLE_OSS_PLUGIN_HEADER (the
 // FB*Plugins pattern) or fbjni/FBI18n — never resolvable in OSS, by design.
-const META_INTERNAL_RE = /^(fbjni|FBI18n)\/|^React\/FB\w+Plugins\.h$/;
+const META_INTERNAL_RE /*: RegExp */ = /^(fbjni|FBI18n)\/|^React\/FB\w+Plugins\.h$/;
 // Non-Apple platform headers (Android-only branches in shared headers).
 const OTHER_PLATFORM_PREFIXES = new Set(['android', 'jni']);
 
@@ -756,9 +756,27 @@ if (require.main === module) {
   main();
 }
 
+/**
+ * In-memory inventory for tooling that needs the classified header set
+ * without going through the JSON manifest on disk (e.g. the prebuild compose
+ * step feeding headers-spec.planFromInventory).
+ */
+function computeInventory(
+  rootFolder /*: string */,
+) /*: {headers: Array<HeaderEntry>} */ {
+  const {entries, sourceToNatural} = buildInventory(rootFolder);
+  classifyEntries(entries, sourceToNatural, rootFolder);
+  return {
+    headers: Array.from(entries.values()).sort((a, b) =>
+      a.naturalPath.localeCompare(b.naturalPath),
+    ),
+  };
+}
+
 module.exports = {
   buildInventory,
   classifyEntries,
+  computeInventory,
   scanHeader,
   THIRD_PARTY_LIBS,
   META_INTERNAL_RE,

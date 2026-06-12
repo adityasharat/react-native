@@ -194,8 +194,41 @@ function buildXCFrameworks(
   // Copy Symbols to symbols folder
   copySymbols(outputPath, frameworkFolders);
 
+  // ZERO-I (Option B + Form 2, RN_ZERO_I_LAYOUT=1): emit the headers-spec
+  // layout into every slice's React.framework (root Headers/ + VFS above stay
+  // untouched — dual-emit for CocoaPods) and build the ReactNativeHeaders
+  // headers-only xcframework beside it. MUST run before signing (spec R7:
+  // the signature pins the header manifest). Gated while the publishing
+  // pipeline is validated; becomes the default in Phase 1 completion.
+  let zeroIHeadersXcfw /*: ?string */ = null;
+  if (process.env.RN_ZERO_I_LAYOUT === '1') {
+    const {
+      buildReactNativeHeadersXcframework,
+      computeSpecPlan,
+      emitReactFrameworkHeaders,
+    } = require('./zero-i-compose');
+    const depsHeaders = path.join(
+      rootFolder,
+      'third-party',
+      'ReactNativeDependencies.xcframework',
+      'Headers',
+    );
+    const plan = computeSpecPlan(rootFolder);
+    emitReactFrameworkHeaders(outputPath, plan, rootFolder);
+    zeroIHeadersXcfw = buildReactNativeHeadersXcframework(
+      path.dirname(outputPath),
+      plan,
+      depsHeaders,
+      rootFolder,
+      true, // include the mac-catalyst slice in the real compose
+    );
+  }
+
   if (identity) {
     signXCFramework(identity, outputPath);
+    if (zeroIHeadersXcfw != null) {
+      signXCFramework(identity, zeroIHeadersXcfw);
+    }
   }
 
   // Tar the output folder to a .tar.gz file
@@ -219,6 +252,29 @@ function buildXCFrameworks(
       `Error creating tar file: ${error.message}. Check if the tar command is available.`,
       'warning',
     );
+  }
+
+  // ZERO-I: publish ReactNativeHeaders alongside React.
+  if (zeroIHeadersXcfw != null) {
+    const headersTarPath = path.join(
+      buildFolder,
+      'output',
+      'xcframeworks',
+      buildType,
+      'ReactNativeHeaders.xcframework.tar.gz',
+    );
+    frameworkLog('Creating tar file: ' + headersTarPath);
+    try {
+      execSync(
+        `tar -czf ${headersTarPath} -C ${path.dirname(zeroIHeadersXcfw)} ReactNativeHeaders.xcframework`,
+        {stdio: 'inherit'},
+      );
+    } catch (error) {
+      frameworkLog(
+        `Error creating ReactNativeHeaders tar: ${error.message}`,
+        'warning',
+      );
+    }
   }
 }
 
