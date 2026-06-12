@@ -86,6 +86,16 @@ function parseArgs(argv /*: Array<string> */) /*: DownloadArgs */ {
       describe:
         'Where to write xcframeworks. Default: ~/Library/Caches/ReactNative/spm-artifacts/{version}/{flavor}/',
     })
+    .option('core-tarball', {
+      type: 'string',
+      describe:
+        'Local React core tarball to use instead of downloading (e.g. the prebuild output). Env fallback: RN_CORE_TARBALL_PATH.',
+    })
+    .option('headers-tarball', {
+      type: 'string',
+      describe:
+        'Local ReactNativeHeaders tarball to use instead of downloading. Env fallback: RN_HEADERS_TARBALL_PATH.',
+    })
     .usage(
       'Usage: $0 [options]\n\nDownloads React Native iOS xcframeworks from Maven.',
     )
@@ -96,6 +106,10 @@ function parseArgs(argv /*: Array<string> */) /*: DownloadArgs */ {
     version: parsed.version ?? null,
     flavor: parsed.flavor.toLowerCase(),
     output: parsed.output ?? null,
+    coreTarball:
+      parsed['core-tarball'] ?? process.env.RN_CORE_TARBALL_PATH ?? null,
+    headersTarball:
+      parsed['headers-tarball'] ?? process.env.RN_HEADERS_TARBALL_PATH ?? null,
   };
 }
 
@@ -282,7 +296,22 @@ async function exists(url /*: string */) /*: Promise<boolean> */ {
 async function resolveRNCoreArtifact(
   version /*: string */,
   flavor /*: string */,
+  localTarball /*: ?string */,
 ) /*: Promise<ResolvedArtifact> */ {
+  // Local-tarball override (--core-tarball / RN_CORE_TARBALL_PATH): use a
+  // locally built core tarball (e.g. the prebuild's output) instead of
+  // downloading. processArtifact() treats an existing local path as "already
+  // downloaded" and always re-extracts it. NOTE: distinct from CocoaPods'
+  // RCT_TESTONLY_RNCORE_TARBALL_PATH — that one belongs to pod install.
+  if (localTarball != null && localTarball !== '') {
+    if (!fs.existsSync(localTarball)) {
+      throw new Error(
+        `core tarball override is set to ${localTarball} but the file does not exist`,
+      );
+    }
+    log(`  Using LOCAL core tarball: ${localTarball}`);
+    return {url: localTarball, version: `${version}-local`};
+  }
   const releaseUrl = rnCoreReleaseUrl(version, flavor);
   if (await exists(releaseUrl)) {
     log(`  Using stable release: ${releaseUrl}`);
@@ -619,6 +648,13 @@ async function processArtifact(
   const {url, version} = resolvedArtifact;
 
   const destXcfwPath = path.join(outputDir, `${xcframeworkName}.xcframework`);
+  // Local-tarball override: `url` is an existing local file. Always
+  // re-extract (a changed local tarball must win over a previous extraction)
+  // and never touch the shared cache.
+  const isLocalTarball = !/^https?:\/\//.test(url) && fs.existsSync(url);
+  if (isLocalTarball && fs.existsSync(destXcfwPath)) {
+    fs.rmSync(destXcfwPath, {recursive: true, force: true});
+  }
   if (fs.existsSync(destXcfwPath)) {
     if (onProgress) {
       onProgress(xcframeworkName, 0, 0, 0, true, 0);
@@ -662,7 +698,14 @@ async function processArtifact(
 
   let tarPath /*: string */;
   let fromShared = false;
-  if (sharedPath != null && fs.existsSync(sharedPath)) {
+  if (isLocalTarball) {
+    tarPath = url;
+    if (onProgress) {
+      onProgress(xcframeworkName, 0, 0, 0, true, 0);
+    } else {
+      log(`  Using local tarball: ${url}`);
+    }
+  } else if (sharedPath != null && fs.existsSync(sharedPath)) {
     // Shared cache hit — skip the download entirely.
     tarPath = sharedPath;
     fromShared = true;
@@ -780,8 +823,14 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
     {
       label: 'react-core',
       name: 'React',
-      resolve: () => resolveRNCoreArtifact(resolvedRnVersion, flavor),
-      sharedName: (v /*: string */) => `reactnative-core-${v}-${flavor}.tar.gz`,
+      resolve: () =>
+        resolveRNCoreArtifact(resolvedRnVersion, flavor, args.coreTarball),
+      // Local overrides skip the shared cache (test artifacts must not
+      // poison the canonical downloads).
+      sharedName:
+        args.coreTarball != null
+          ? null
+          : (v /*: string */) => `reactnative-core-${v}-${flavor}.tar.gz`,
     },
     {
       label: 'rndeps',
@@ -798,6 +847,29 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
       sharedName: (v /*: string */) => `hermes-ios-${v}-${flavor}.tar.gz`,
     },
   ];
+
+  // ReactNativeHeaders (zero-I Form 2 artifact): currently local-tarball only
+  // (--headers-tarball / RN_HEADERS_TARBALL_PATH, e.g. the prebuild output at
+  // .build/output/xcframeworks/<flavor>/ReactNativeHeaders.xcframework.tar.gz).
+  // The Maven resolve joins this list when nightlies publish the artifact.
+  const headersTarball = args.headersTarball;
+  if (headersTarball != null && headersTarball !== '') {
+    if (!fs.existsSync(headersTarball)) {
+      die(
+        `headers tarball override is set to ${headersTarball} but the file does not exist`,
+      );
+    }
+    artifactSpecs.push({
+      label: 'rnheaders',
+      name: 'ReactNativeHeaders',
+      resolve: () =>
+        Promise.resolve({
+          url: headersTarball,
+          version: `${resolvedRnVersion}-local`,
+        }),
+      sharedName: null,
+    });
+  }
 
   const progress = createProgressDisplay(
     artifactSpecs.length,

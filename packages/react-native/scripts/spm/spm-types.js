@@ -78,6 +78,8 @@ export type DownloadArgs = {
   version: string | null,
   flavor: string,
   output: string | null,
+  coreTarball: string | null,
+  headersTarball: string | null,
 };
 
 export type ResolvedArtifact = {

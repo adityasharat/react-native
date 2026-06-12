@@ -341,11 +341,16 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
     // ZERO-I Form 2: the headers-only ReactNativeHeaders library xcframework
     // joins the package — its binaryTarget auto-serves all non-React
     // namespace headers (incl. third-party deps) to dependents, no flags.
+    // Skipped when artifacts.json already provided it (downloaded/local
+    // tarball via download-spm-artifacts) — that entry takes precedence.
     const zeroIHeadersXcfw = path.join(
       path.dirname(zeroIReactXcfw),
       'ReactNativeHeaders.xcframework',
     );
-    if (fs.existsSync(zeroIHeadersXcfw)) {
+    if (
+      !names.includes('ReactNativeHeaders') &&
+      fs.existsSync(zeroIHeadersXcfw)
+    ) {
       const linkPath = path.join(
         xcfwLinksDir,
         'ReactNativeHeaders.xcframework',
