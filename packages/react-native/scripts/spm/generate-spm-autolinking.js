@@ -617,7 +617,6 @@ function generateAutolinkedPackageSwift(
   const inlineTargets /*: $ReadOnlyArray<SpmTarget> */ =
     input.inlineTargets ?? [];
   const hasReactDep /*: boolean */ = input.hasReactDep !== false;
-  const hasXcfwHeaders /*: boolean */ = input.hasXcfwHeaders === true;
   // Relative path from autolinked/ to build/xcframeworks/, e.g. "../build/xcframeworks".
   const xcframeworksRelPath /*: ?string */ = input.xcframeworksRelPath;
 
@@ -679,11 +678,6 @@ function generateAutolinkedPackageSwift(
       ? `\n            dependencies: [${aggregateDeps.join(', ')}],`
       : '';
 
-  // The header search paths come from spm-paths.json (read at SPM-eval time by
-  // the loader); this manifest sits in the same dir as that file, so rel = "".
-  // Only emitted when inline targets need the `-I` flags.
-  const headerBlock = hasXcfwHeaders ? `${renderRNPathsLoader('')}\n\n` : '';
-
   const inlineDeclsBlock =
     inlineDecls.length > 0 ? `,\n${inlineDecls.join(',\n')}` : '';
 
@@ -697,7 +691,7 @@ function generateAutolinkedPackageSwift(
 import PackageDescription
 import Foundation
 
-${headerBlock}let package = Package(
+let package = Package(
     name: "Autolinked",
     platforms: [.iOS(.v15)],
     products: [

@@ -11,30 +11,7 @@
 // with xcframework configuration built in.
 
 import PackageDescription
-import Foundation
 
-let packageDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
-
-// Single source of truth for React Native header search paths (spm-paths.json,
-// written by `npx react-native spm`). Read here so this manifest's text holds
-// no absolute paths.
-struct RNSpmPaths: Decodable {
-    let formatVersion: Int
-    let appRoot: String
-}
-let rnSpmPaths: RNSpmPaths = {
-    let url = URL(fileURLWithPath: packageDir + "/../autolinking/spm-paths.json").standardized
-    guard let data = try? Data(contentsOf: url),
-          let decoded = try? JSONDecoder().decode(RNSpmPaths.self, from: data) else {
-        fatalError("React Native SPM: cannot read \(url.path). Run 'npx react-native spm' to (re)generate it.")
-    }
-    precondition(
-        decoded.formatVersion == 1,
-        "React Native SPM: spm-paths.json formatVersion \(decoded.formatVersion) is unsupported (expected 1). Upgrade react-native or re-run 'npx react-native spm'."
-    )
-    return decoded
-}()
-let appRoot = rnSpmPaths.appRoot
 // React headers need NO search paths: React/react namespaces come from the
 // React binaryTarget (auto -F; headers + module map inside the framework),
 // every other namespace from the ReactNativeHeaders binaryTarget, and the
