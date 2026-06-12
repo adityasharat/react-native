@@ -204,14 +204,6 @@ function resolveReactNativeRoot(
   return null;
 }
 
-// The header search-path tree is split into two roots, so consumers emit TWO
-// `-I`s: the shared, app-independent RN-core/deps tree (`rnCoreHeaders`) and the
-// per-app codegen/autolinking tree (`appHeaders`). Both are Swift `let`s emitted
-// by renderRNPathsLoader (decoded from spm-paths.json at SPM-eval time).
-// `-fno-implicit-module-maps` keeps nested <react/...> includes textual (not via
-// the framework module copied into the build products dir). The shared `-I`
-// precedes the per-app one to preserve the old single-tree first-wins precedence.
-const SHARED_HEADERS_SUBDIR = 'ReactCoreHeaders';
 // The per-app farm lives INSIDE the codegen package (build/generated/ios) so
 // it can be vended as a normal SPM headers target ("ReactAppHeaders") — under
 // zero-I the farm reaches consumers via SPM product dependencies, not -I.
@@ -223,63 +215,40 @@ const PER_APP_HEADERS_REL = 'build/generated/ios/ReactAppHeaders';
 const SCAFFOLDER_MARKER =
   '// AUTO-SCAFFOLDED by react-native spm scaffold — safe to edit & commit via patch-package.';
 
-// ZERO-I (Option B + Form 2, the decided target): when the repackaged
-// artifacts exist (React.xcframework with the spec layout + the
-// ReactNativeHeaders headers-only library xcframework), React core resolves
-// via the React binaryTarget's auto `-F` and ReactNativeHeaders' auto header
-// serving — NO search-path flags for the React surface at all. Only the
-// per-app codegen/autolinking `-I` (appHeaders) remains — it is the app's own
-// generated code, not the React surface. Activation is generation-time and
-// file-based (build/zero-i present) so generated manifests stay deterministic.
+// The locally composed zero-I layout (see zero-i-compose.ensureZeroILayout):
+// generate-spm-package keeps it fresh from the cache slot whenever the slot's
+// artifacts don't already ship the spec layout. These helpers expose the
+// composed header roots for the community-manifest paths.json (grandfathered
+// `-I` contract — see writeSharedPathsJson).
 const ZERO_I_DIR = path.resolve(__dirname, '..', '..', 'build', 'zero-i');
-function zeroIActive() /*: boolean */ {
-  return fs.existsSync(path.join(ZERO_I_DIR, 'React.xcframework'));
+function composedHeaderRoots() /*: {react: ?string, rnh: ?string} */ {
+  const reactXcfw = path.join(ZERO_I_DIR, 'React.xcframework');
+  const rnhXcfw = path.join(ZERO_I_DIR, 'ReactNativeHeaders.xcframework');
+  let react = null;
+  let rnh = null;
+  try {
+    const slice = fs
+      .readdirSync(reactXcfw)
+      .find(d =>
+        fs.existsSync(path.join(reactXcfw, d, 'React.framework', 'Headers')),
+      );
+    if (slice != null) {
+      react = path.join(reactXcfw, slice, 'React.framework', 'Headers');
+    }
+  } catch {}
+  try {
+    const slice = fs
+      .readdirSync(rnhXcfw)
+      .find(d => fs.existsSync(path.join(rnhXcfw, d, 'Headers')));
+    if (slice != null) {
+      rnh = path.join(rnhXcfw, slice, 'Headers');
+    }
+  } catch {}
+  return {react, rnh};
 }
 
-function reactHeaderCFlags() /*: Array<string> */ {
-  // Zero-I: NO search-path flags at all. React core comes from the React +
-  // ReactNativeHeaders binaryTargets; the per-app generated headers come from
-  // the ReactAppHeaders SPM target (codegen package) — all auto-served.
-  return zeroIActive() ? [] : ['"-I", rnCoreHeaders, "-I", appHeaders'];
-}
-function reactHeaderCxxFlags() /*: Array<string> */ {
-  return zeroIActive()
-    ? []
-    : ['"-fno-implicit-module-maps"', '"-I", rnCoreHeaders, "-I", appHeaders'];
-}
-
-// Absolute on-disk locations of the two header trees. Centralized so the tree
-// builders and the spm-paths.json writers agree without re-deriving.
-function sharedHeadersDir(
-  projectRoot /*: string */,
-  slotVersion /*: string */,
-) /*: string */ {
-  return path.join(
-    projectRoot,
-    '.react-native',
-    'headers',
-    slotVersion,
-    SHARED_HEADERS_SUBDIR,
-  );
-}
 function perAppHeadersDir(appRoot /*: string */) /*: string */ {
   return path.join(appRoot, PER_APP_HEADERS_REL);
-}
-
-// Per-app symlink (at <xcfwDir>/ReactCoreHeaders) to the shared RN-core tree,
-// so the app target's pbxproj can reference it via a relocatable
-// `$(SRCROOT)/build/xcframeworks/ReactCoreHeaders` (no machine-absolute paths
-// committed in the project file). The shared tree itself is materialized once at
-// the repo root; this is just a lightweight link.
-function ensureSymlink(
-  linkPath /*: string */,
-  target /*: string */,
-) /*: void */ {
-  try {
-    fs.rmSync(linkPath, {recursive: true, force: true});
-  } catch {}
-  fs.mkdirSync(path.dirname(linkPath), {recursive: true});
-  fs.symlinkSync(target, linkPath);
 }
 
 /**
@@ -298,15 +267,13 @@ function renderRNPathsLoader(relPath /*: string */) /*: string */ {
   const rel = relPath === '' ? '' : `${relPath}/`;
   return `let packageDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 
-// Single source of truth for React Native header search paths (spm-paths.json,
-// written by \`npx react-native spm\`). Read here so this manifest's text holds
-// no absolute paths.
+// Single source of truth for React Native paths (spm-paths.json, written by
+// \`npx react-native spm\`). Read here so this manifest's text holds no
+// absolute paths. Headers need no paths at all — they are served by the
+// React/ReactNativeHeaders binaryTargets and the ReactAppHeaders target.
 struct RNSpmPaths: Decodable {
     let formatVersion: Int
     let appRoot: String
-    let rnCoreHeaders: String
-    let appHeaders: String
-    let zeroIFrameworks: String? // ZERO-I SPIKE: namespace-frameworks dir ("" = off)
 }
 let rnSpmPaths: RNSpmPaths = {
     let url = URL(fileURLWithPath: packageDir + "/${rel}spm-paths.json").standardized
@@ -320,19 +287,7 @@ let rnSpmPaths: RNSpmPaths = {
     )
     return decoded
 }()
-let appRoot = rnSpmPaths.appRoot
-let rnCoreHeaders = rnSpmPaths.rnCoreHeaders
-let appHeaders = rnSpmPaths.appHeaders
-let zeroI = !(rnSpmPaths.zeroIFrameworks ?? "").isEmpty
-// ZERO-I (Option B + Form 2): React core resolves via the React binaryTarget
-// (-F auto), the ReactNativeHeaders binaryTarget (auto header serving), and
-// the ReactAppHeaders SPM target (per-app generated headers) — NO flags.
-let rnHeaderCFlags: [String] = zeroI
-    ? []
-    : ["-I", rnCoreHeaders, "-I", appHeaders]
-let rnHeaderCxxFlags: [String] = zeroI
-    ? []
-    : ["-fno-implicit-module-maps", "-I", rnCoreHeaders, "-I", appHeaders]`;
+let appRoot = rnSpmPaths.appRoot`;
 }
 
 /**
@@ -424,140 +379,9 @@ function createHeaderLinker(
   return {seen, stats, linkInto, foldDir};
 }
 
-/**
- * Resolves React.xcframework + its VFS template under `xcfwDir` (the per-app
- * build/xcframeworks dir, whose React.xcframework is a symlink into the global
- * artifact cache). Returns null if either is missing.
- */
-function resolveReactXcframework(
-  xcfwDir /*: string */,
-  logger /*: {log: (msg: string) => void} */,
-) /*: ?{realXcfw: string, vfsTemplatePath: string} */ {
-  const reactXcfw = path.join(xcfwDir, 'React.xcframework');
-  if (!fs.existsSync(reactXcfw)) {
-    return null;
-  }
-  const realXcfw = fs.realpathSync(reactXcfw);
-  const vfsTemplatePath = path.join(realXcfw, 'React-VFS-template.yaml');
-  if (!fs.existsSync(vfsTemplatePath)) {
-    logger.log(
-      'No React-VFS-template.yaml in React.xcframework — skipping shared header tree',
-    );
-    return null;
-  }
-  return {realXcfw, vfsTemplatePath};
-}
-
-/**
- * Links the React headers described by React-VFS-template.yaml into `linker`.
- * The template's `name` chain is the authoritative virtual->physical map (incl.
- * the no-`header_dir` prefix rule).
- */
-function linkReactVfsHeaders(
-  linker /*: {linkInto: (v: string, p: string) => void, ...} */,
-  realXcfw /*: string */,
-  vfsTemplatePath /*: string */,
-) /*: void */ {
-  const unquote = (s /*: string */) /*: string */ =>
-    s.replace(/^['"]/, '').replace(/['"]$/, '');
-  const template = fs
-    .readFileSync(vfsTemplatePath, 'utf8')
-    .split('${ROOT_PATH}')
-    .join(realXcfw);
-  const entries /*: Array<{indent: number, name: string, external: ?string}> */ =
-    [];
-  for (const line of template.split('\n')) {
-    let m = line.match(/^(\s*)- name:\s*(.*)$/);
-    if (m) {
-      entries.push({
-        indent: m[1].length,
-        name: unquote(m[2].trim()),
-        external: null,
-      });
-      continue;
-    }
-    m = line.match(/^\s*external-contents:\s*(.*)$/);
-    if (m && entries.length > 0) {
-      entries[entries.length - 1].external = unquote(m[1].trim());
-    }
-  }
-  const stack /*: Array<{indent: number, name: string}> */ = [];
-  let rootPrefix /*: ?string */ = null;
-  for (const e of entries) {
-    while (stack.length > 0 && stack[stack.length - 1].indent >= e.indent) {
-      stack.pop();
-    }
-    stack.push({indent: e.indent, name: e.name});
-    const full = stack.map(s => s.name).join('/');
-    if (rootPrefix == null && full.endsWith('/Headers')) {
-      rootPrefix = full + '/';
-    }
-    const external = e.external;
-    if (external != null && rootPrefix != null && full.startsWith(rootPrefix)) {
-      linker.linkInto(full.slice(rootPrefix.length), external);
-    }
-  }
-}
-
 /*::
 type HeaderTreeResult = {path: ?string, virtualPaths: Set<string>};
 */
-
-/**
- * Materializes the APP-INDEPENDENT React-core/deps header tree at
- * <projectRoot>/.react-native/headers/<slotVersion>/ReactCoreHeaders: the React
- * VFS-template headers, the bare React_RCTAppDelegate headers, and the
- * ReactNativeDependencies headers — all sourced from the globally-cached
- * xcframeworks, so the tree is identical for every app on a given slot.
- *
- * Always rebuilt fresh, and ALL prior slot dirs are pruned first, so an updated
- * react-native (new tooling / new artifact layout) reliably re-materializes the
- * tree — no stale tree survives behind a sentinel, and old slots don't pile up.
- * The tree is symlinks, so a rebuild is cheap. Returns {path, virtualPaths}
- * (path null if no xcfw).
- */
-function buildSharedReactCoreHeaderTree(
-  projectRoot /*: string */,
-  slotVersion /*: string */,
-  xcfwDir /*: string */,
-  logger /*: {log: (msg: string) => void} */ = {log() {}},
-) /*: HeaderTreeResult */ {
-  const resolved = resolveReactXcframework(xcfwDir, logger);
-  if (resolved == null) {
-    return {path: null, virtualPaths: new Set()};
-  }
-  const outDir = sharedHeadersDir(projectRoot, slotVersion);
-  // This app's relocatable link into the tree, so the pbxproj can reference
-  // `$(SRCROOT)/build/xcframeworks/ReactCoreHeaders`.
-  const appLink = path.join(xcfwDir, 'ReactCoreHeaders');
-  // Prune every prior slot (the whole headers/ dir), then rebuild the current
-  // slot — guarantees freshness after an RN update and prevents accumulation.
-  const headersRoot = path.join(projectRoot, '.react-native', 'headers');
-  fs.rmSync(headersRoot, {recursive: true, force: true});
-  fs.mkdirSync(outDir, {recursive: true});
-
-  const linker = createHeaderLinker(outDir, logger);
-  linkReactVfsHeaders(linker, resolved.realXcfw, resolved.vfsTemplatePath);
-  // Host apps import React_RCTAppDelegate headers BARE (e.g.
-  // `#import <RCTDefaultReactNativeFactoryDelegate.h>`), so expose them at root.
-  linker.foldDir(
-    path.join(resolved.realXcfw, 'Headers', 'React_RCTAppDelegate'),
-  );
-  const depsXcfw = path.join(xcfwDir, 'ReactNativeDependencies.xcframework');
-  if (fs.existsSync(depsXcfw)) {
-    linker.foldDir(path.join(fs.realpathSync(depsXcfw), 'Headers'));
-  }
-  ensureSymlink(appLink, outDir);
-
-  logger.log(
-    `Built shared RN-core header tree (${linker.seen.size} headers` +
-      (linker.stats.collisions > 0
-        ? `, ${linker.stats.collisions} non-identical collisions`
-        : '') +
-      ')',
-  );
-  return {path: outDir, virtualPaths: new Set(linker.seen.keys())};
-}
 
 /**
  * Materializes the PER-APP header tree at
@@ -608,51 +432,14 @@ function buildPerAppHeaderTree(
 }
 
 /**
- * Surfaces virtual paths present in BOTH trees. The split flips one inner
- * ordering vs the old single tree (autolinking was folded before deps); the
- * shared `-I` now precedes the per-app `-I`, so a shadowed header resolves from
- * the shared tree. Logged as telemetry — the merged set is collision-free in
- * practice. No-op when either keyset is unavailable (e.g. shared-tree skip).
- */
-function logCrossTreeShadows(
-  sharedResult /*: HeaderTreeResult */,
-  perAppResult /*: HeaderTreeResult */,
-  logger /*: {log: (msg: string) => void} */ = {log() {}},
-) /*: void */ {
-  if (
-    sharedResult.virtualPaths.size === 0 ||
-    perAppResult.virtualPaths.size === 0
-  ) {
-    return;
-  }
-  let shadows = 0;
-  for (const k of perAppResult.virtualPaths) {
-    if (sharedResult.virtualPaths.has(k)) {
-      shadows++;
-      if (shadows <= 10) {
-        logger.log(
-          `NOTE: header in both shared and per-app trees: ${k} (shared -I wins)`,
-        );
-      }
-    }
-  }
-  if (shadows > 0) {
-    logger.log(
-      `Cross-tree header shadows: ${shadows} (shared RN-core -I precedes per-app -I)`,
-    );
-  }
-}
-
-/**
  * Writes the PER-APP single-source-of-truth spm-paths.json. Generated build-dir
- * manifests read it at SPM-eval time for the two `-I` header roots. Paths are
- * deterministic (not gated on tree materialization) so the file always exists
- * for the manifest loader after setup/sync. Holds machine-absolute paths.
+ * manifests read it at SPM-eval time (appRoot — used to locate the ReactNative
+ * and codegen packages). Header resolution itself needs NO paths: headers are
+ * served by the React/ReactNativeHeaders binaryTargets and the ReactAppHeaders
+ * SPM target. Holds machine-absolute paths.
  */
 function writeAppPathsJson(
   appRoot /*: string */,
-  projectRoot /*: string */,
-  slotVersion /*: string */,
   logger /*: {log: (msg: string) => void} */ = {log() {}},
 ) /*: void */ {
   const outDir = path.join(appRoot, 'build', 'generated', 'autolinking');
@@ -660,11 +447,8 @@ function writeAppPathsJson(
   const json = {
     formatVersion: 1,
     appRoot,
-    rnCoreHeaders: sharedHeadersDir(projectRoot, slotVersion),
+    // Retained for older scaffolded manifests that still decode it.
     appHeaders: perAppHeadersDir(appRoot),
-    // ZERO-I (Option B + Form 2): non-empty = zero-I active; generated
-    // manifests then drop the RN-core -I (see renderRNPathsLoader).
-    zeroIFrameworks: zeroIActive() ? ZERO_I_DIR : '',
     // The generated ReactNative binary-target package (React/Hermes/deps
     // xcframeworks). Provided so consumer manifests can `.package(path:)` it
     // without hardcoding the build/xcframeworks layout.
@@ -690,6 +474,7 @@ function writeSharedPathsJson(
   reactNativeVersion /*: string */,
   logger /*: {log: (msg: string) => void} */ = {log() {}},
 ) /*: void */ {
+  const roots = composedHeaderRoots();
   const outDir = path.join(projectRoot, '.react-native');
   fs.mkdirSync(outDir, {recursive: true});
   // Self-ignoring .gitignore: the whole .react-native/ dir is generated,
@@ -698,9 +483,14 @@ function writeSharedPathsJson(
   // project root above the app's own .gitignore). `*` also ignores this file
   // itself, so the dir disappears from git entirely.
   fs.writeFileSync(path.join(outDir, '.gitignore'), '*\n', 'utf8');
+  // GRANDFATHERED `-I` contract for hand-authored community manifests:
+  // rnCoreHeaders now points INSIDE the composed artifact (the one canonical
+  // React/react header root); rnhHeaders carries the remaining namespaces.
+  // The community-scaffold redesign (product-deps based) supersedes this.
   const json = {
     formatVersion: 1,
-    rnCoreHeaders: sharedHeadersDir(projectRoot, slotVersion),
+    rnCoreHeaders: roots.react ?? '',
+    rnhHeaders: roots.rnh ?? '',
     reactNativeVersion,
     cacheSlot: slotVersion,
   };
@@ -802,15 +592,11 @@ module.exports = {
   readPackageJson,
   findProjectRoot,
   resolveReactNativeRoot,
-  buildSharedReactCoreHeaderTree,
   buildPerAppHeaderTree,
-  logCrossTreeShadows,
+  composedHeaderRoots,
   writeAppPathsJson,
   writeSharedPathsJson,
   renderRNPathsLoader,
-  reactHeaderCFlags,
-  reactHeaderCxxFlags,
-  zeroIActive,
   installSpmCodegenTemplate,
   runCodegenAndInstallTemplate,
   SCAFFOLDER_MARKER,

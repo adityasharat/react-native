@@ -41,8 +41,6 @@ const {readPodspec} = require('./read-podspec');
 const {
   SCAFFOLDER_MARKER,
   makeLogger,
-  reactHeaderCFlags,
-  reactHeaderCxxFlags,
   toSwiftName,
 } = require('./spm-utils');
 const fs = require('fs');
@@ -288,26 +286,29 @@ function emitScaffoldedPackageSwift(
   const slotComment =
     ctx.cacheSlotLabel != null ? `\n// Cache slot: ${ctx.cacheSlotLabel}` : '';
 
-  // cFlags / cxxFlags. Two `-I`s — the shared RN-core/deps tree and the per-app
-  // codegen/autolinking tree, both under the consuming app's
-  // build/xcframeworks/ (rnCoreHeaders is a per-app symlink into the repo-root
-  // shared tree). They reference the rnCoreHeaders / appHeaders Swift lets
-  // emitted below. Per-dep HEADER_SEARCH_PATHS from the podspec are emitted as
-  // `.headerSearchPath("<rel>")` so they resolve relative to `path:` ("." below).
-  const cFlagsBase = reactHeaderCFlags();
-  const cxxFlagsBase = reactHeaderCxxFlags();
+  // React headers need NO search paths — they come from the React /
+  // ReactNativeHeaders binaryTargets and the ReactAppHeaders product (see
+  // the dependencies block below). Per-dep HEADER_SEARCH_PATHS from the
+  // podspec are emitted as `.headerSearchPath("<rel>")` so they resolve
+  // relative to `path:` ("." below). Custom podspec compiler flags keep
+  // using unsafeFlags (rare; surfaced verbatim).
   const customFlagsCxx = spec.compilerFlags.map(f => `"${f}"`);
 
   const headerSearchPathDirectives = spec.headerSearchPaths
     .map(p => `.headerSearchPath("${p}")`)
     .join(', ');
-  const headerSearchPathPrefix =
-    headerSearchPathDirectives.length > 0
-      ? `${headerSearchPathDirectives}, `
-      : '';
-
-  const cSettings = `[${headerSearchPathPrefix}.unsafeFlags([${cFlagsBase.join(', ')}])]`;
-  const cxxSettings = `[${headerSearchPathPrefix}.unsafeFlags([${[...cxxFlagsBase, ...customFlagsCxx].join(', ')}])]`;
+  const settingsEntries = (extra /*: Array<string> */) => {
+    const parts = [headerSearchPathDirectives, ...extra].filter(
+      e => e.length > 0,
+    );
+    return `[${parts.join(', ')}]`;
+  };
+  const cSettings = settingsEntries([]);
+  const cxxSettings = settingsEntries(
+    customFlagsCxx.length > 0
+      ? [`.unsafeFlags([${customFlagsCxx.join(', ')}])`]
+      : [],
+  );
 
   // Linker frameworks: defaults + podspec-declared extras + weak frameworks.
   // Dedup on render so the user doesn't see duplicate UIKit lines.
@@ -332,7 +333,16 @@ function emitScaffoldedPackageSwift(
     packageDeps.push(
       '.package(name: "ReactNative", path: appRoot + "/build/xcframeworks")',
     );
+    packageDeps.push(
+      '.package(name: "React-GeneratedCode", path: appRoot + "/build/generated/ios")',
+    );
     targetDeps.push('.product(name: "ReactNative", package: "ReactNative")');
+    targetDeps.push(
+      '.product(name: "ReactNativeHeaders", package: "ReactNative")',
+    );
+    targetDeps.push(
+      '.product(name: "ReactAppHeaders", package: "React-GeneratedCode")',
+    );
   }
   for (const siblingName of spec.siblingNames) {
     const swiftSibling = toSwiftName(siblingName);

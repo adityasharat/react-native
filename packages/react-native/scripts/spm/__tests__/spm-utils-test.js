@@ -12,13 +12,9 @@
 
 const {
   buildPerAppHeaderTree,
-  buildSharedReactCoreHeaderTree,
   defaultCacheDir,
   displayPath,
-  logCrossTreeShadows,
   makeLogger,
-  reactHeaderCFlags,
-  reactHeaderCxxFlags,
   readPackageJson,
   renderRNPathsLoader,
   resolveReactNativeRoot,
@@ -26,7 +22,6 @@ const {
   sharedCacheDir,
   toSwiftName,
   writeAppPathsJson,
-  writeSharedPathsJson,
 } = require('../spm-utils');
 const fs = require('fs');
 const os = require('os');
@@ -311,14 +306,10 @@ describe('runCodegenAndInstallTemplate', () => {
 // ---------------------------------------------------------------------------
 // buildMergedHeaderTree
 // ---------------------------------------------------------------------------
-describe('split header trees', () => {
+describe('per-app header farm (ReactAppHeaders SPM target)', () => {
   let tempDir;
-  let projectRoot;
   let appRoot;
-  let xcfwDir;
-  let sharedDir;
   let perAppDir;
-  const SLOT = 'test-slot';
 
   function writeFile(p, contents) {
     fs.mkdirSync(path.dirname(p), {recursive: true});
@@ -326,68 +317,14 @@ describe('split header trees', () => {
   }
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spm-merged-test-'));
-    projectRoot = tempDir;
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spm-farm-test-'));
     appRoot = path.join(tempDir, 'app');
-    xcfwDir = path.join(appRoot, 'build', 'xcframeworks');
-    sharedDir = path.join(
-      projectRoot,
-      '.react-native',
-      'headers',
-      SLOT,
-      'ReactCoreHeaders',
-    );
-    perAppDir = path.join(xcfwDir, 'ReactAppHeaders');
-
-    const reactXcfw = path.join(xcfwDir, 'React.xcframework');
-    // Namespaced physical React headers (as shipped in the xcframework).
-    writeFile(
-      path.join(reactXcfw, 'Headers', 'React_Fabric', 'react', 'foo', 'Bar.h'),
-      '#pragma once\n// react Bar\n',
-    );
-    // React_RCTAppDelegate headers — host apps import these BARE, so they must
-    // also surface at the merged-tree root.
-    writeFile(
-      path.join(
-        reactXcfw,
-        'Headers',
-        'React_RCTAppDelegate',
-        'RCTDefaultReactNativeFactoryDelegate.h',
-      ),
-      '#pragma once\n// app delegate\n',
-    );
-    // VFS template mapping the virtual <react/foo/Bar.h> to that physical file.
-    writeFile(
-      path.join(reactXcfw, 'React-VFS-template.yaml'),
-      [
-        'version: 0',
-        'case-sensitive: false',
-        'roots:',
-        "  - name: '${ROOT_PATH}/Headers'",
-        "    type: 'directory'",
-        '    contents:',
-        "      - name: 'react'",
-        "        type: 'directory'",
-        '        contents:',
-        "          - name: 'foo'",
-        "            type: 'directory'",
-        '            contents:',
-        "              - name: 'Bar.h'",
-        "                type: 'file'",
-        "                external-contents: '${ROOT_PATH}/Headers/React_Fabric/react/foo/Bar.h'",
-        '',
-      ].join('\n'),
-    );
-    // Deps headers (natural layout, folded in).
-    writeFile(
-      path.join(
-        xcfwDir,
-        'ReactNativeDependencies.xcframework',
-        'Headers',
-        'folly',
-        'dynamic.h',
-      ),
-      '#pragma once\n// folly\n',
+    perAppDir = path.join(
+      appRoot,
+      'build',
+      'generated',
+      'ios',
+      'ReactAppHeaders',
     );
     // Autolinking header farm — a SYMLINK farm (leaf headers are symlinks to
     // the dep's real source). foldDir must follow symlinks, not skip them.
@@ -404,8 +341,7 @@ describe('split header trees', () => {
     );
     fs.mkdirSync(path.dirname(farmHeader), {recursive: true});
     fs.symlinkSync(realProviderHeader, farmHeader);
-    // Codegen header (folded in) + a duplicate of the React virtual path with
-    // DIFFERENT content, to prove React (folded first) wins.
+    // Codegen output (folded both at generated/ios root and ReactCodegen/).
     writeFile(
       path.join(
         appRoot,
@@ -419,77 +355,13 @@ describe('split header trees', () => {
       ),
       '#pragma once\n// codegen\n',
     );
-    writeFile(
-      path.join(appRoot, 'build', 'generated', 'ios', 'react', 'foo', 'Bar.h'),
-      '#pragma once\n// codegen Bar (should NOT win)\n',
-    );
   });
 
   afterEach(() => {
     fs.rmSync(tempDir, {recursive: true, force: true});
   });
 
-  it('shared tree: only app-independent React/deps/RCTAppDelegate headers', () => {
-    const result = buildSharedReactCoreHeaderTree(projectRoot, SLOT, xcfwDir);
-    expect(result.path).toBe(sharedDir);
-
-    // React header resolves via its natural import path (symlink)...
-    const reactHeader = path.join(sharedDir, 'react', 'foo', 'Bar.h');
-    expect(fs.existsSync(reactHeader)).toBe(true);
-    expect(fs.lstatSync(reactHeader).isSymbolicLink()).toBe(true);
-    // ...deps headers folded in...
-    expect(fs.existsSync(path.join(sharedDir, 'folly', 'dynamic.h'))).toBe(
-      true,
-    );
-    // ...React_RCTAppDelegate exposed BARE at the root.
-    expect(
-      fs.existsSync(
-        path.join(sharedDir, 'RCTDefaultReactNativeFactoryDelegate.h'),
-      ),
-    ).toBe(true);
-    // ...but NOT per-app codegen/autolinking headers.
-    expect(fs.existsSync(path.join(sharedDir, 'MyLib', 'Provider.h'))).toBe(
-      false,
-    );
-    expect(
-      fs.existsSync(
-        path.join(sharedDir, 'react', 'renderer', 'EventEmitters.h'),
-      ),
-    ).toBe(false);
-  });
-
-  it('shared tree: creates the per-app ReactCoreHeaders symlink into the shared tree', () => {
-    buildSharedReactCoreHeaderTree(projectRoot, SLOT, xcfwDir);
-    const link = path.join(xcfwDir, 'ReactCoreHeaders');
-    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
-    expect(fs.realpathSync(link)).toBe(fs.realpathSync(sharedDir));
-  });
-
-  it('prunes stale slot dirs and rebuilds fresh (so an RN update reliably applies)', () => {
-    // A prior run left an old slot dir behind.
-    const oldSlotDir = path.join(
-      projectRoot,
-      '.react-native',
-      'headers',
-      'old-slot',
-      'ReactCoreHeaders',
-    );
-    fs.mkdirSync(oldSlotDir, {recursive: true});
-    fs.writeFileSync(path.join(oldSlotDir, 'stale.h'), '// stale\n');
-
-    const result = buildSharedReactCoreHeaderTree(projectRoot, SLOT, xcfwDir);
-
-    // The old slot is gone (pruned), the current slot is freshly built.
-    expect(fs.existsSync(oldSlotDir)).toBe(false);
-    expect(result.path).toBe(sharedDir);
-    expect(fs.existsSync(path.join(sharedDir, 'react', 'foo', 'Bar.h'))).toBe(
-      true,
-    );
-    // No sentinel file lingers in the tree.
-    expect(fs.existsSync(path.join(sharedDir, '.slot-complete'))).toBe(false);
-  });
-
-  it('per-app tree: only codegen/autolinking headers (no React/deps)', () => {
+  it('folds codegen + autolinking headers and lives inside the codegen package', () => {
     const result = buildPerAppHeaderTree(appRoot);
     expect(result.path).toBe(perAppDir);
     expect(fs.existsSync(path.join(perAppDir, 'MyLib', 'Provider.h'))).toBe(
@@ -500,49 +372,37 @@ describe('split header trees', () => {
         path.join(perAppDir, 'react', 'renderer', 'EventEmitters.h'),
       ),
     ).toBe(true);
-    // the codegen copy of react/foo/Bar.h lives here (its own seen map)...
-    const bar = path.join(perAppDir, 'react', 'foo', 'Bar.h');
-    expect(fs.existsSync(bar)).toBe(true);
-    expect(fs.readFileSync(bar, 'utf8')).toContain('should NOT win');
-    // ...and React/deps headers are NOT in the per-app tree.
-    expect(fs.existsSync(path.join(perAppDir, 'folly', 'dynamic.h'))).toBe(
-      false,
-    );
-  });
-
-  it('shared tree: returns null path when the xcframework is absent', () => {
-    fs.rmSync(path.join(xcfwDir, 'React.xcframework'), {
-      recursive: true,
-      force: true,
-    });
+    // <ReactCodegen/...> include form resolves via the farm root.
     expect(
-      buildSharedReactCoreHeaderTree(projectRoot, SLOT, xcfwDir).path,
-    ).toBe(null);
-  });
-
-  it('logCrossTreeShadows: reports a virtual path present in both trees', () => {
-    const shared = buildSharedReactCoreHeaderTree(projectRoot, SLOT, xcfwDir);
-    const perApp = buildPerAppHeaderTree(appRoot);
-    const msgs = [];
-    logCrossTreeShadows(shared, perApp, {log: m => msgs.push(m)});
-    // react/foo/Bar.h is in both (React in shared, codegen copy in per-app).
-    expect(msgs.some(m => m.includes('react/foo/Bar.h'))).toBe(true);
-  });
-
-  it('writes the two SoT JSON files with the split header paths', () => {
-    writeSharedPathsJson(projectRoot, SLOT, '0.99.0');
-    writeAppPathsJson(appRoot, projectRoot, SLOT);
-
-    const shared = JSON.parse(
-      fs.readFileSync(
-        path.join(projectRoot, '.react-native', 'paths.json'),
-        'utf8',
+      fs.existsSync(
+        path.join(
+          perAppDir,
+          'ReactCodegen',
+          'react',
+          'renderer',
+          'EventEmitters.h',
+        ),
       ),
-    );
-    expect(shared.formatVersion).toBe(1);
-    expect(shared.rnCoreHeaders).toBe(sharedDir);
-    expect(shared.reactNativeVersion).toBe('0.99.0');
+    ).toBe(true);
+  });
 
+  it('carries the SPM stub source so the farm is a valid target', () => {
+    buildPerAppHeaderTree(appRoot);
+    expect(fs.existsSync(path.join(perAppDir, 'ReactAppHeadersStub.c'))).toBe(
+      true,
+    );
+  });
+
+  it('rebuilds cleanly on re-run without folding its previous self', () => {
+    buildPerAppHeaderTree(appRoot);
+    const second = buildPerAppHeaderTree(appRoot);
+    // No nested ReactAppHeaders/ReactAppHeaders self-fold artifacts.
+    expect(fs.existsSync(path.join(perAppDir, 'ReactAppHeaders'))).toBe(false);
+    expect(second.virtualPaths.has('MyLib/Provider.h')).toBe(true);
+  });
+
+  it('writes spm-paths.json with appRoot (headers need no paths)', () => {
+    writeAppPathsJson(appRoot);
     const app = JSON.parse(
       fs.readFileSync(
         path.join(
@@ -557,161 +417,32 @@ describe('split header trees', () => {
     );
     expect(app.formatVersion).toBe(1);
     expect(app.appRoot).toBe(appRoot);
-    expect(app.rnCoreHeaders).toBe(sharedDir);
-    expect(app.appHeaders).toBe(perAppDir);
     expect(app.reactNativePackage).toBe(
       path.join(appRoot, 'build', 'xcframeworks'),
     );
+    // No header-search-path fields: resolution is product-dependency based.
+    expect(app.rnCoreHeaders).toBeUndefined();
+    expect(app.zeroIFrameworks).toBeUndefined();
   });
 });
 
 // ---------------------------------------------------------------------------
-// renderRNPathsLoader + header flags
+// renderRNPathsLoader
 // ---------------------------------------------------------------------------
-describe('renderRNPathsLoader / reactHeader flags', () => {
+describe('renderRNPathsLoader', () => {
   it('emits a JSON loader reading spm-paths.json at the given relative path', () => {
     const out = renderRNPathsLoader('../..');
     expect(out).toContain('URL(fileURLWithPath: #filePath)');
     expect(out).toContain('packageDir + "/../../spm-paths.json"');
     expect(out).toContain('JSONDecoder().decode(RNSpmPaths.self');
     expect(out).toContain('decoded.formatVersion == 1');
-    expect(out).toContain('let rnCoreHeaders = rnSpmPaths.rnCoreHeaders');
-    expect(out).toContain('let appHeaders = rnSpmPaths.appHeaders');
+    expect(out).toContain('let appRoot = rnSpmPaths.appRoot');
+    // Header-tree vars are gone — headers are served via product deps.
+    expect(out).not.toContain('rnCoreHeaders');
+    expect(out).not.toContain('appHeaders');
   });
 
   it('renders the same-dir path for an empty rel', () => {
     expect(renderRNPathsLoader('')).toContain('packageDir + "/spm-paths.json"');
-  });
-
-  it('header flags reference the two split vars (shared before per-app)', () => {
-    expect(reactHeaderCFlags().join(', ')).toBe(
-      '"-I", rnCoreHeaders, "-I", appHeaders',
-    );
-    const cxx = reactHeaderCxxFlags().join(', ');
-    expect(cxx).toContain('"-fno-implicit-module-maps"');
-    expect(cxx).toContain('"-I", rnCoreHeaders, "-I", appHeaders');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Multi-app monorepo: two apps in one repo share the slot-keyed RN-core tree
-// while each gets its own per-app tree + SoT. Guards the "works in a monorepo"
-// claim for the core mechanism (no per-app ambiguity for the shared half).
-// ---------------------------------------------------------------------------
-describe('multi-app monorepo header trees', () => {
-  let repoRoot;
-  const SLOT = 'slot-1';
-
-  function writeFile(p, contents) {
-    fs.mkdirSync(path.dirname(p), {recursive: true});
-    fs.writeFileSync(p, contents);
-  }
-
-  // Minimal app with a React.xcframework + VFS template under build/xcframeworks.
-  function makeApp(name) {
-    const appRoot = path.join(repoRoot, 'apps', name);
-    const xcfwDir = path.join(appRoot, 'build', 'xcframeworks');
-    const reactXcfw = path.join(xcfwDir, 'React.xcframework');
-    writeFile(
-      path.join(reactXcfw, 'Headers', 'React_Fabric', 'react', 'foo', 'Bar.h'),
-      '#pragma once\n',
-    );
-    writeFile(
-      path.join(reactXcfw, 'React-VFS-template.yaml'),
-      [
-        'roots:',
-        "  - name: '${ROOT_PATH}/Headers'",
-        '    contents:',
-        "      - name: 'react'",
-        '        contents:',
-        "          - name: 'foo'",
-        '            contents:',
-        "              - name: 'Bar.h'",
-        "                external-contents: '${ROOT_PATH}/Headers/React_Fabric/react/foo/Bar.h'",
-        '',
-      ].join('\n'),
-    );
-    // A per-app codegen header, unique per app.
-    writeFile(
-      path.join(
-        appRoot,
-        'build',
-        'generated',
-        'ios',
-        'ReactCodegen',
-        `${name}Spec.h`,
-      ),
-      '#pragma once\n',
-    );
-    return {appRoot, xcfwDir};
-  }
-
-  beforeEach(() => {
-    repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'spm-monorepo-test-'));
-  });
-  afterEach(() => {
-    fs.rmSync(repoRoot, {recursive: true, force: true});
-  });
-
-  it('shares one RN-core tree across apps; each app gets its own per-app tree + SoT', () => {
-    const a = makeApp('AppA');
-    const b = makeApp('AppB');
-
-    const sharedA = buildSharedReactCoreHeaderTree(repoRoot, SLOT, a.xcfwDir);
-    // AppB on the same slot+projectRoot resolves to the same shared tree path.
-    const sharedB = buildSharedReactCoreHeaderTree(repoRoot, SLOT, b.xcfwDir);
-    expect(sharedA.path).toBe(sharedB.path);
-
-    // Each app's relocatable symlink resolves to that ONE shared tree.
-    const linkA = path.join(a.xcfwDir, 'ReactCoreHeaders');
-    const linkB = path.join(b.xcfwDir, 'ReactCoreHeaders');
-    expect(fs.realpathSync(linkA)).toBe(fs.realpathSync(sharedA.path));
-    expect(fs.realpathSync(linkB)).toBe(fs.realpathSync(sharedA.path));
-
-    // Per-app trees are distinct and carry that app's own codegen header.
-    buildPerAppHeaderTree(a.appRoot);
-    buildPerAppHeaderTree(b.appRoot);
-    expect(
-      fs.existsSync(path.join(a.xcfwDir, 'ReactAppHeaders', 'AppASpec.h')),
-    ).toBe(true);
-    expect(
-      fs.existsSync(path.join(b.xcfwDir, 'ReactAppHeaders', 'AppBSpec.h')),
-    ).toBe(true);
-    // AppA's per-app tree must NOT contain AppB's spec (no cross-app leakage).
-    expect(
-      fs.existsSync(path.join(a.xcfwDir, 'ReactAppHeaders', 'AppBSpec.h')),
-    ).toBe(false);
-
-    // Each app's spm-paths.json: same shared rnCoreHeaders, app-specific appRoot.
-    writeAppPathsJson(a.appRoot, repoRoot, SLOT);
-    writeAppPathsJson(b.appRoot, repoRoot, SLOT);
-    const jsonA = JSON.parse(
-      fs.readFileSync(
-        path.join(
-          a.appRoot,
-          'build',
-          'generated',
-          'autolinking',
-          'spm-paths.json',
-        ),
-        'utf8',
-      ),
-    );
-    const jsonB = JSON.parse(
-      fs.readFileSync(
-        path.join(
-          b.appRoot,
-          'build',
-          'generated',
-          'autolinking',
-          'spm-paths.json',
-        ),
-        'utf8',
-      ),
-    );
-    expect(jsonA.rnCoreHeaders).toBe(jsonB.rnCoreHeaders); // shared
-    expect(jsonA.appRoot).toBe(a.appRoot);
-    expect(jsonB.appRoot).toBe(b.appRoot);
-    expect(jsonA.appHeaders).not.toBe(jsonB.appHeaders); // per-app
   });
 });

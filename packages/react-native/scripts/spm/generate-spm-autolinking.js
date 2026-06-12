@@ -45,7 +45,7 @@
  * V1 behavior:
  *   - Processes npm-package native modules with platforms.ios != null from autolinking.json
  *   - Also processes any `spm.modules` entries from react-native.config.js for local modules
- *   - Each target gets unsafeFlags for header resolution
+ *   - Targets resolve React headers via SPM product dependencies (no flags)
  *
  * V2 behavior (future):
  *   - npm packages with their own Package.swift use .package(url: ...) instead of inline targets
@@ -57,30 +57,23 @@ const {
   expandSpmDependencies,
 } = require('./expand-spm-dependencies');
 const {readPodspec} = require('./read-podspec');
-const {
-  makeLogger,
-  reactHeaderCFlags,
-  reactHeaderCxxFlags,
-  renderRNPathsLoader,
-  toSwiftName,
-  zeroIActive,
-} = require('./spm-utils');
+const {makeLogger, renderRNPathsLoader, toSwiftName} = require('./spm-utils');
 const fs = require('fs');
 const path = require('path');
 const yargs = require('yargs');
 
 const {log} = makeLogger('generate-spm-autolinking');
 
-// ZERO-I Form 2: targets compiling against React also depend on the
-// ReactNativeHeaders product (headers-only binaryTarget) so SPM auto-serves
-// the non-React namespace headers — replacing the RN-core -I.
+// Targets compiling against React get all headers via SPM product
+// dependencies — no search-path flags: React/react namespaces from the React
+// binaryTarget, every other namespace from the ReactNativeHeaders
+// binaryTarget, and the app's generated headers from the ReactAppHeaders
+// target in the codegen package.
 function reactProductDeps() /*: string */ {
   return (
     '.product(name: "ReactNative", package: "ReactNative")' +
-    (zeroIActive()
-      ? ', .product(name: "ReactNativeHeaders", package: "ReactNative")' +
-        ', .product(name: "ReactAppHeaders", package: "React-GeneratedCode")'
-      : '')
+    ', .product(name: "ReactNativeHeaders", package: "ReactNative")' +
+    ', .product(name: "ReactAppHeaders", package: "React-GeneratedCode")'
   );
 }
 
@@ -642,11 +635,9 @@ function generateAutolinkedPackageSwift(
     packageDeps.push(
       `.package(name: "ReactNative", path: "${xcframeworksRelPath}")`,
     );
-    if (zeroIActive()) {
-      // Zero-I: per-app generated headers come from the ReactAppHeaders
-      // product in the codegen package (sibling of the autolinking dir).
-      packageDeps.push(`.package(name: "React-GeneratedCode", path: "../ios")`);
-    }
+    // Per-app generated headers come from the ReactAppHeaders product in
+    // the codegen package (sibling of the autolinking dir).
+    packageDeps.push(`.package(name: "React-GeneratedCode", path: "../ios")`);
   }
 
   // AutolinkedAggregate's target dependencies: .product(...) for npm sub-package
@@ -657,17 +648,6 @@ function generateAutolinkedPackageSwift(
     ),
     ...inlineTargets.map(t => `.target(name: "${t.name}")`),
   ];
-
-  // Per-target c/cxx flag stacks (shared across inline targets). Two `-I`s (the
-  // shared RN-core/deps tree + the per-app codegen/autolinking tree) cover
-  // React, deps, codegen, and autolinking headers; the paths come from the
-  // loader's rnCoreHeaders / appHeaders vars (see renderRNPathsLoader).
-  const cFlagsCore /*: Array<string> */ = hasXcfwHeaders
-    ? reactHeaderCFlags()
-    : [];
-  const cxxFlagsCore /*: Array<string> */ = hasXcfwHeaders
-    ? reactHeaderCxxFlags()
-    : [];
 
   const inlineDecls = inlineTargets.map(t => {
     const excludeLine =
@@ -682,18 +662,10 @@ function generateAutolinkedPackageSwift(
       t.resources && t.resources.length > 0
         ? `\n            resources: [${t.resources.map(r => `.copy("${r}")`).join(', ')}],`
         : '';
-    const cSettingsLine =
-      cFlagsCore.length > 0
-        ? `\n            cSettings: [.unsafeFlags([${cFlagsCore.join(', ')}])],`
-        : '';
-    const cxxSettingsLine =
-      cxxFlagsCore.length > 0
-        ? `\n            cxxSettings: [.unsafeFlags([${cxxFlagsCore.join(', ')}])],`
-        : '';
     return `        .target(
             name: "${t.name}",
             dependencies: [${reactProductDeps()}],
-            path: "${t.path}",${excludeLine}${publicHeadersLine}${resourcesLine}${cSettingsLine}${cxxSettingsLine}
+            path: "${t.path}",${excludeLine}${publicHeadersLine}${resourcesLine}
             linkerSettings: [.linkedFramework("UIKit"), .linkedFramework("Foundation"), .linkedFramework("CoreGraphics")]
         )`;
   });
@@ -785,13 +757,11 @@ function generateSynthPackageSwift(spec /*: SynthPackageSpec */) /*: string */ {
     packageDeps.push(
       `.package(name: "ReactNative", path: appRoot + "/build/xcframeworks")`,
     );
-    if (zeroIActive()) {
-      // Zero-I: per-app generated headers come from the ReactAppHeaders
-      // product in the codegen package.
-      packageDeps.push(
-        `.package(name: "React-GeneratedCode", path: appRoot + "/build/generated/ios")`,
-      );
-    }
+    // Per-app generated headers come from the ReactAppHeaders product in
+    // the codegen package.
+    packageDeps.push(
+      `.package(name: "React-GeneratedCode", path: appRoot + "/build/generated/ios")`,
+    );
   }
   for (const dep of spmDependencies) {
     const absPath = siblingSynthAbsolutePaths[dep.swiftName];
@@ -817,14 +787,6 @@ function generateSynthPackageSwift(spec /*: SynthPackageSpec */) /*: string */ {
       `.product(name: "${dep.swiftName}", package: "${dep.swiftName}")`,
     );
   }
-
-  // C / C++ settings: two `-I`s (shared RN-core + per-app) covering React, deps,
-  // codegen, and autolinking headers. The flags reference the rnCoreHeaders /
-  // appHeaders Swift vars the loader defines.
-  const cFlags /*: Array<string> */ = hasXcfwHeaders ? reactHeaderCFlags() : [];
-  const cxxFlags /*: Array<string> */ = hasXcfwHeaders
-    ? reactHeaderCxxFlags()
-    : [];
 
   // The loader provides appRoot + the two header vars from spm-paths.json. Emit
   // it when the dep needs the React dep path or the `-I` flags. rel = "../.."
@@ -855,24 +817,19 @@ function generateSynthPackageSwift(spec /*: SynthPackageSpec */) /*: string */ {
     packageDeps.length > 0
       ? `    dependencies: [\n        ${packageDeps.join(',\n        ')},\n    ],\n`
       : '';
-  // `.headerSearchPath(...)` entries from the podspec — rendered alongside
-  // the `.unsafeFlags(...)` block. Listing them as first-class directives
-  // keeps SPM's diagnostics meaningful (clang reports the dep-relative path
-  // on miss) and avoids the absolute-path noise the unsafeFlags route brings.
+  // `.headerSearchPath(...)` entries from the podspec — first-class
+  // directives keep SPM's diagnostics meaningful (clang reports the
+  // dep-relative path on miss). React headers need no paths at all.
   const headerSearchPathDirectives = headerSearchPaths
     .map(p => `.headerSearchPath("${p}")`)
     .join(', ');
-  const headerSearchPathPrefix =
-    headerSearchPathDirectives.length > 0
-      ? `${headerSearchPathDirectives}, `
-      : '';
   const cSettingsLine =
-    cFlags.length > 0 || headerSearchPaths.length > 0
-      ? `\n            cSettings: [${headerSearchPathPrefix}.unsafeFlags([${cFlags.join(', ')}])],`
+    headerSearchPaths.length > 0
+      ? `\n            cSettings: [${headerSearchPathDirectives}],`
       : '';
   const cxxSettingsLine =
-    cxxFlags.length > 0 || headerSearchPaths.length > 0
-      ? `\n            cxxSettings: [${headerSearchPathPrefix}.unsafeFlags([${cxxFlags.join(', ')}])],`
+    headerSearchPaths.length > 0
+      ? `\n            cxxSettings: [${headerSearchPathDirectives}],`
       : '';
 
   return `// swift-tools-version: 6.0

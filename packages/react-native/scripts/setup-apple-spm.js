@@ -95,13 +95,11 @@ const {
 const {scaffoldAll} = require('./spm/scaffold-package-swift');
 const {
   buildPerAppHeaderTree,
-  buildSharedReactCoreHeaderTree,
   defaultCacheDir,
   deriveAppName,
   displayPath,
   findProjectRoot,
   installSpmCodegenTemplate,
-  logCrossTreeShadows,
   makeLogger,
   readPackageJson,
   runCodegenAndInstallTemplate,
@@ -1523,28 +1521,21 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
   // (Re)install the static codegen Package.swift template once build/generated/ios exists.
   installSpmCodegenTemplate(appRoot, reactNativeRoot, {log});
 
-  // Materialize the split header trees (shared RN-core/deps + per-app codegen/
-  // autolinking) and write the single-source-of-truth path files the generated
-  // manifests read at SPM-eval time. Runs last: folds in the xcframework,
-  // codegen, and autolinking headers.
+  // Build the per-app generated-headers farm (vended as the ReactAppHeaders
+  // SPM target inside the codegen package) and write the path files the
+  // generated manifests read at SPM-eval time. React core headers need no
+  // trees — they live inside the composed artifacts (generate-spm-package).
   const headerSlotVersion = await resolveCacheSlotVersion(
     args.version ?? version,
   );
-  const sharedHeaders = buildSharedReactCoreHeaderTree(
-    projectRoot,
-    headerSlotVersion,
-    path.join(appRoot, 'build', 'xcframeworks'),
-    {log},
-  );
-  const perAppHeaders = buildPerAppHeaderTree(appRoot, {log});
-  logCrossTreeShadows(sharedHeaders, perAppHeaders, {log});
+  buildPerAppHeaderTree(appRoot, {log});
   writeSharedPathsJson(
     projectRoot,
     headerSlotVersion,
     args.version ?? version,
     {log},
   );
-  writeAppPathsJson(appRoot, projectRoot, headerSlotVersion, {log});
+  writeAppPathsJson(appRoot, {log});
 
   let migrationRename /*: {from: string, to: string} | null */ = null;
   if (action === 'init') {

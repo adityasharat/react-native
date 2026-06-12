@@ -83,9 +83,14 @@ describe('generateAutolinkedPackageSwift (aggregator)', () => {
     expect(result).toMatch(
       /name: "ScreenshotManager",[\s\S]*?\.product\(name: "ReactNative", package: "ReactNative"\)/,
     );
-    // Inline target gets the two split-tree includes + linker frameworks, and no
-    // legacy VFS overlay flag.
-    expect(result).toContain('"-I", rnCoreHeaders, "-I", appHeaders');
+    // Inline targets resolve headers via product deps — no -I flags, no VFS.
+    expect(result).toContain(
+      '.product(name: "ReactNativeHeaders", package: "ReactNative")',
+    );
+    expect(result).toContain(
+      '.product(name: "ReactAppHeaders", package: "React-GeneratedCode")',
+    );
+    expect(result).not.toContain('rnCoreHeaders');
     expect(result).not.toContain('-ivfsoverlay');
     expect(result).toContain('.linkedFramework("CoreGraphics")');
   });
@@ -184,25 +189,30 @@ describe('generateSynthPackageSwift', () => {
     );
   });
 
-  it('reads the split header paths via the loader and emits two -I when hasXcfwHeaders is true', () => {
+  it('serves React headers via product deps when hasXcfwHeaders is true', () => {
     const result = generateSynthPackageSwift(baseSpec({hasXcfwHeaders: true}));
-    // The loader (rel "../..") reads spm-paths.json and exposes the two vars.
+    // The loader (rel "../..") reads spm-paths.json for appRoot only.
     expect(result).toContain('packageDir + "/../../spm-paths.json"');
-    expect(result).toContain('let rnCoreHeaders = rnSpmPaths.rnCoreHeaders');
-    expect(result).toContain('let appHeaders = rnSpmPaths.appHeaders');
-    expect(result).toContain('"-I", rnCoreHeaders, "-I", appHeaders');
-    // No absolute paths and no legacy VFS overlay / per-framework derivation.
+    expect(result).toContain('let appRoot = rnSpmPaths.appRoot');
+    expect(result).toContain(
+      '.product(name: "ReactNativeHeaders", package: "ReactNative")',
+    );
+    expect(result).toContain(
+      '.product(name: "ReactAppHeaders", package: "React-GeneratedCode")',
+    );
+    // No header-search-path vars, no flags, no legacy VFS machinery.
+    expect(result).not.toContain('rnCoreHeaders');
+    expect(result).not.toContain('unsafeFlags([\"-I\"');
     expect(result).not.toContain('ReactHeadersAll');
     expect(result).not.toContain('-ivfsoverlay');
     expect(result).not.toContain('let xcfwHeaders');
     expect(result).not.toContain('let vfsOverlay');
   });
 
-  it('covers deps/codegen via the two split trees (no separate depsHeaders -I)', () => {
+  it('covers deps/codegen via the binaryTargets (no separate depsHeaders -I)', () => {
     const result = generateSynthPackageSwift(
       baseSpec({hasXcfwHeaders: true, hasDepsHeaders: true}),
     );
-    expect(result).toContain('"-I", rnCoreHeaders, "-I", appHeaders');
     expect(result).not.toContain('let depsHeaders');
     expect(result).not.toContain('"-I", depsHeaders');
   });
@@ -310,9 +320,8 @@ describe('generateSynthPackageSwift', () => {
       appRootAbsolute: '/abs/app',
       autogenHeadersAbsolute: '/abs/app/build/generated/autolinking/headers',
     });
-    // The autolinking headers dir is folded into the per-app tree, so it is no
-    // longer a separate -I; only the two split-tree includes remain.
-    expect(result).toContain('"-I", rnCoreHeaders, "-I", appHeaders');
+    // The autolinking headers dir is folded into the per-app farm (served by
+    // the ReactAppHeaders product) — never a separate -I.
     expect(result).not.toContain(
       '"-I", "/abs/app/build/generated/autolinking/headers"',
     );

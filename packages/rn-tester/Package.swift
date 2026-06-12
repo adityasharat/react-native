@@ -14,6 +14,7 @@ do {
         import PackageDescription
         let package = Package(name: "ReactNative", products: [
             .library(name: "ReactNative", targets: ["ReactNativeStub"]),
+            .library(name: "ReactNativeHeaders", targets: ["ReactNativeStub"]),
             .library(name: "ReactNativeDependencies", targets: ["ReactNativeStub"]),
             .library(name: "hermes-engine", targets: ["ReactNativeStub"]),
         ], targets: [.target(name: "ReactNativeStub", path: "_stub", sources: ["Stub.swift"])])
@@ -31,6 +32,7 @@ do {
         let package = Package(name: "React-GeneratedCode", products: [
             .library(name: "ReactCodegen", targets: ["ReactGeneratedCodeStub"]),
             .library(name: "ReactAppDependencyProvider", targets: ["ReactGeneratedCodeStub"]),
+            .library(name: "ReactAppHeaders", targets: ["ReactGeneratedCodeStub"]),
         ], targets: [.target(name: "ReactGeneratedCodeStub", path: "_stub", sources: ["Stub.swift"])])
         """),
     ]
@@ -78,17 +80,14 @@ let package = Package(
             ],
             path: "RNTester",
             exclude: ["SwiftTest.swift", "main.m", "Info.plist", "Images.xcassets", "LaunchScreen.storyboard"],
-            publicHeadersPath: ".",
-            cSettings: [],
-            cxxSettings: []
+            publicHeadersPath: "."
         ),
         // Swift sources in a separate target (SPM does not allow mixed-language targets)
         .target(
             name: "RNTesterAppSwift",
             dependencies: ["RNTesterApp"],
             path: "RNTester",
-            sources: ["SwiftTest.swift"],
-            swiftSettings: []
+            sources: ["SwiftTest.swift"]
         ),
     ],
     cxxLanguageStandard: .cxx20
