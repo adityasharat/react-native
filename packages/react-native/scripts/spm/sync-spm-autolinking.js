@@ -46,9 +46,8 @@ const {
   installSpmCodegenTemplate,
   makeLogger,
   readPackageJson,
+  remotePackageConfig,
   runCodegenAndInstallTemplate,
-  writeAppPathsJson,
-  writeSharedPathsJson,
 } = require('./spm-utils');
 const fs = require('fs');
 const path = require('path');
@@ -107,7 +106,11 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
   const expectedCacheDir = defaultCacheDir(slotVersion, flavor);
   const expectedArtifactsJson = path.join(expectedCacheDir, 'artifacts.json');
 
-  if (!fs.existsSync(expectedArtifactsJson)) {
+  // Remote SPM package mode: artifacts come from the remote package (SPM
+  // resolves + caches them) — no Maven download, no local artifacts package.
+  const remote = remotePackageConfig(appRoot);
+
+  if (remote == null && !fs.existsSync(expectedArtifactsJson)) {
     log(
       `Downloading xcframework artifacts (slot: ${slotVersion}, ${displayPath(expectedCacheDir)})...`,
     );
@@ -119,10 +122,12 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
       '--output',
       expectedCacheDir,
     ]);
-  } else {
+  } else if (remote == null) {
     log(
       `Using cached xcframework artifacts (slot: ${slotVersion}, ${displayPath(expectedCacheDir)})`,
     );
+  } else {
+    log(`Remote ReactNative package: ${remote.url} @ ${remote.version}`);
   }
   // Always feed the expected slot into generate-spm-package — it rewrites the
   // local symlinks at <app>/build/xcframeworks/ to point at this slot. If the
@@ -138,27 +143,27 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
     reactNativeRoot,
   ]);
 
-  log('Re-generating xcframeworks sub-package...');
-  generatePackage([
-    '--app-root',
-    appRoot,
-    '--react-native-root',
-    reactNativeRoot,
-    '--artifacts-dir',
-    artifactsDir,
-  ]);
+  if (remote == null) {
+    log('Re-generating xcframeworks sub-package...');
+    generatePackage([
+      '--app-root',
+      appRoot,
+      '--react-native-root',
+      reactNativeRoot,
+      '--artifacts-dir',
+      artifactsDir,
+    ]);
+  }
 
   // (Re)install the static codegen template now that build/generated/ios is finalized.
   installSpmCodegenTemplate(appRoot, reactNativeRoot, {log});
 
   // Rebuild the per-app generated-headers farm (vended as the ReactAppHeaders
-  // SPM target inside the codegen package), then write the path files the
-  // generated manifests read at SPM-eval time. Manifest text stays constant;
-  // only the JSON + symlink contents change. React core headers need no trees
-  // — they live inside the composed artifacts (see generate-spm-package).
+  // SPM target inside the codegen package). React core headers need no trees
+  // — they live inside the composed artifacts (see generate-spm-package). The
+  // generated manifests are fully declarative (fixed-relative package paths),
+  // so no path-locator JSON is written.
   buildPerAppHeaderTree(appRoot, {log});
-  writeSharedPathsJson(projectRoot, slotVersion, rawVersion, {log});
-  writeAppPathsJson(appRoot, {log});
 
   const stampPath = path.join(
     appRoot,

@@ -52,6 +52,7 @@ const {
   findProjectRoot,
   makeLogger,
   resolveReactNativeRoot,
+  remotePackageConfig,
 } = require('./spm-utils');
 const fs = require('fs');
 const path = require('path');
@@ -171,6 +172,7 @@ function generatePbxproj(
   files: {sources: Array<string>, headers: Array<string>, resources: Array<string>, plists: Array<string>},
   hasPrivacyInfo: boolean,
   entryFile?: string,
+  appRoot?: string,
 } */,
 ) /*: string */ {
   const {
@@ -183,6 +185,7 @@ function generatePbxproj(
     hasPrivacyInfo,
   } = opts;
   const entryFile = opts.entryFile ?? 'index.js';
+  const appRoot = opts.appRoot;
 
   const projectUUID = uuid(appName, 'PBXProject', 'root');
   const mainGroupUUID = uuid(appName, 'PBXGroup', 'mainGroup');
@@ -233,14 +236,30 @@ function generatePbxproj(
     'XCBuildConfiguration',
     'target:Release',
   );
+  // Remote SPM package mode: the ReactNative-family products reference the
+  // remote package (XCRemoteSwiftPackageReference) instead of the local
+  // artifacts package.
+  const remote = appRoot != null ? remotePackageConfig(appRoot) : null;
+  const productPackages = SPM_PRODUCT_PACKAGES.map(e =>
+    remote != null && e.packagePath === 'build/xcframeworks'
+      ? {...e, packagePath: 'REMOTE', packageName: remote.identity}
+      : e,
+  );
+  const remotePkgRefUUID =
+    remote != null
+      ? uuid(appName, 'XCRemoteSwiftPackageReference', remote.url)
+      : null;
+
   // Dedupe sub-package references by path (multiple products share a package).
   const uniquePackages /*: Array<{packagePath: string, packageName: string}> */ =
     Array.from(
       new Map(
-        SPM_PRODUCT_PACKAGES.map(e => [
-          e.packagePath,
-          {packagePath: e.packagePath, packageName: e.packageName},
-        ]),
+        productPackages
+          .filter(e => e.packagePath !== 'REMOTE')
+          .map(e => [
+            e.packagePath,
+            {packagePath: e.packagePath, packageName: e.packageName},
+          ]),
       ).values(),
     );
   const localPkgRefUUIDs = uniquePackages.map(pkg =>
@@ -374,7 +393,7 @@ function generatePbxproj(
   // SPM package product dependencies
   const spmDepEntries /*: Array<PbxEntry> */ = [];
   const spmDepUUIDs /*: Array<string> */ = [];
-  for (const entry of SPM_PRODUCT_PACKAGES) {
+  for (const entry of productPackages) {
     const {product, packagePath} = entry;
     const depUUID = uuid(appName, 'XCSwiftPackageProductDependency', product);
     spmDepUUIDs.push(depUUID);
@@ -390,18 +409,23 @@ function generatePbxproj(
       },
     });
 
-    // Link this product dependency to its sub-package reference
-    const pkgRefUUID = uuid(
-      appName,
-      'XCLocalSwiftPackageReference',
-      packagePath,
-    );
+    // Link this product dependency to its package reference (local or remote).
+    // Test remotePkgRefUUID directly in the ternary (not via an intermediate
+    // boolean) so Flow refines away its null in the remote branch.
+    const pkgRefUUID =
+      packagePath === 'REMOTE' && remotePkgRefUUID != null
+        ? remotePkgRefUUID
+        : uuid(appName, 'XCLocalSwiftPackageReference', packagePath);
+    const isRemote = packagePath === 'REMOTE' && remotePkgRefUUID != null;
+    const refComment = isRemote
+      ? `XCRemoteSwiftPackageReference "${remote?.identity ?? ''}"`
+      : `XCLocalSwiftPackageReference "${packagePath}"`;
     spmDepEntries.push({
       uuid: depUUID,
       comment: product,
       fields: {
         isa: 'XCSwiftPackageProductDependency',
-        package: `${pkgRefUUID} /* XCLocalSwiftPackageReference "${packagePath}" */`,
+        package: `${pkgRefUUID} /* ${refComment} */`,
         productName: quoteIfNeeded(product),
       },
     });
@@ -521,7 +545,7 @@ REACT_NATIVE_XCODE="${reactNativePath}/scripts/react-native-xcode.sh"
         attributes: `{\n\t\t\t\tBuildIndependentTargetsInParallel = 1;\n\t\t\t\tLastUpgradeCheck = 1600;\n\t\t\t}`,
         buildConfigurationList: `${projectConfigListUUID} /* Build configuration list for PBXProject "${appName}" */`,
         mainGroup: mainGroupUUID,
-        packageReferences: `(\n${localPkgRefUUIDs.map((id, i) => `\t\t\t\t${id} /* XCLocalSwiftPackageReference "${uniquePackages[i].packagePath}" */,\n`).join('')}\t\t\t)`,
+        packageReferences: `(\n${remotePkgRefUUID != null ? `\t\t\t\t${remotePkgRefUUID} /* XCRemoteSwiftPackageReference "${remote?.identity ?? ''}" */,\n` : ''}${localPkgRefUUIDs.map((id, i) => `\t\t\t\t${id} /* XCLocalSwiftPackageReference "${uniquePackages[i].packagePath}" */,\n`).join('')}\t\t\t)`,
         productRefGroup: `${productsGroupUUID} /* Products */`,
         projectDirPath: quoteIfNeeded(''),
         projectRoot: quoteIfNeeded(''),
@@ -713,6 +737,20 @@ REACT_NATIVE_XCODE="${reactNativePath}/scripts/react-native-xcode.sh"
       },
     })),
   ];
+
+  if (remote != null && remotePkgRefUUID != null) {
+    sections.XCRemoteSwiftPackageReference = [
+      {
+        uuid: remotePkgRefUUID,
+        comment: `XCRemoteSwiftPackageReference "${remote.identity}"`,
+        fields: {
+          isa: 'XCRemoteSwiftPackageReference',
+          repositoryURL: quoteIfNeeded(remote.url),
+          requirement: `{\n\t\t\t\tkind = exactVersion;\n\t\t\t\tversion = "${remote.version}";\n\t\t\t}`,
+        },
+      },
+    ];
+  }
 
   sections.XCSwiftPackageProductDependency = spmDepEntries;
 
@@ -1152,6 +1190,7 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
     files,
     hasPrivacyInfo,
     entryFile,
+    appRoot,
   });
 
   const pbxprojPath = path.join(projDir, 'project.pbxproj');

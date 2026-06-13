@@ -197,6 +197,7 @@ function serializePbxproj(
     'XCBuildConfiguration',
     'XCConfigurationList',
     'XCLocalSwiftPackageReference',
+    'XCRemoteSwiftPackageReference',
     'XCSwiftPackageProductDependency',
   ];
 

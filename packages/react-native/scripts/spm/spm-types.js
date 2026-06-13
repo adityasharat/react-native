@@ -217,15 +217,8 @@ export type AggregatorInput = {
   npmDeps?: $ReadOnlyArray<NpmDepRef>,
   inlineTargets?: $ReadOnlyArray<SpmTarget>,
   hasReactDep?: boolean,
-  hasXcfwHeaders?: boolean,
-  hasDepsHeaders?: boolean,
-  // Absolute slot-resolved Headers dirs. When provided, baked into the
-  // manifest as string literals so SPM's manifest-hash bumps on every slot
-  // change (instead of `.resolvingSymlinksInPath()` being evaluated once and
-  // its result cached against the prior slot).
-  xcfwHeadersAbsolute?: ?string,
-  depsHeadersAbsolute?: ?string,
-  codegenHeadersIncluded?: boolean,
+  // Relative path from the aggregator's dir (autolinking/) to
+  // build/xcframeworks. Used for the inline-target ReactNative dep.
   xcframeworksRelPath?: ?string,
 };
 
@@ -239,34 +232,18 @@ export type SynthPackageSpec = {
   sources?: ?Array<string>,
   spmDependencies?: Array<{swiftName: string}>,
   hasReactDep?: boolean,
-  hasXcfwHeaders?: boolean,
-  hasDepsHeaders?: boolean,
-  // See AggregatorInput.xcfwHeadersAbsolute — same purpose at the synth
-  // layer (each per-dep Package.swift).
-  xcfwHeadersAbsolute?: ?string,
-  depsHeadersAbsolute?: ?string,
-  codegenHeadersIncluded?: boolean,
+  // Relative path (posix, from the synth dir <outputDir>/packages/<Name>) to
+  // the app's React xcframeworks package and codegen package. Computed by the
+  // caller at generation time — the synth holds no runtime discovery.
+  reactNativePackagePath?: string,
+  codegenPackagePath?: string,
   resources?: ?Array<string>,
   isDynamic?: boolean,
   targetPath?: string,
-  // Sub-package emission (legacy): synth Package.swift lives at a fixed depth
-  // under autolinked/packages/<Name>/, so appRoot is reachable via "../../.."
-  // and siblings via "../<Other>".
-  appRootRelativeToPackage?: string,
+  // Fallback relative base for sibling synth packages when the caller does not
+  // supply absolute paths (tests). Production uses siblingSynthAbsolutePaths.
   siblingPackageBaseRelative?: string,
-  // Wrapper-dir emission (current production layout): synth Package.swift
-  // lives under <outputDir>/packages/<SwiftName>/ with `root` being a dir
-  // symlink to the dep's real source dir. `appRoot` is hardcoded absolute,
-  // and cross-package includes resolve via `-I <autogenHeadersAbsolute>`
-  // instead of SPM's `publicHeadersPath` (so the dep's source dir stays
-  // untouched).
-  appRootAbsolute?: string,
   siblingSynthAbsolutePaths?: {[swiftName: string]: string},
-  // Absolute path to <outputDir>/headers — added to cSettings/cxxSettings
-  // so cross-package `#import <SwiftName/Header.h>` resolves through
-  // <autogenHeaders>/<SwiftName>/<Header>.h file symlinks. Drops the need
-  // for per-package publicHeadersPath.
-  autogenHeadersAbsolute?: string,
   // Header search paths from the dep's podspec `pod_target_xcconfig`
   // HEADER_SEARCH_PATHS, with `$(PODS_TARGET_SRCROOT)` substituted and the
   // synth wrapper's `root/` prefix applied. Emitted as `.headerSearchPath()`

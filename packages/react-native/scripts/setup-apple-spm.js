@@ -102,9 +102,8 @@ const {
   installSpmCodegenTemplate,
   makeLogger,
   readPackageJson,
+  remotePackageConfig,
   runCodegenAndInstallTemplate,
-  writeAppPathsJson,
-  writeSharedPathsJson,
 } = require('./spm/spm-utils');
 const fs = require('fs');
 const os = require('os');
@@ -279,12 +278,6 @@ const SPM_GITIGNORE_ENTRIES = [
   'build/generated/',
   'build/xcframeworks/',
   '.build/',
-  // The SoT contract + shared header tree (machine-absolute paths — never
-  // commit). This appRoot entry covers the common single-app case; the
-  // authoritative exclusion is a self-ignoring `.react-native/.gitignore`
-  // written by writeSharedPathsJson, which works even when `.react-native/`
-  // sits at a project root above the app's own .gitignore (monorepo).
-  '.react-native/',
 ];
 
 /**
@@ -1491,51 +1484,49 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
     return;
   }
 
-  try {
-    const artifactsDir = prepareLocalXcframeworkArtifacts(
-      args,
-      appRoot,
-      version,
-    );
-    resolvedArtifactsDir = await ensureArtifacts(args, version, artifactsDir);
-  } catch (e) {
-    logError(`Artifact setup failed: ${e.message}`);
-    process.exitCode = 1;
-    return;
-  }
+  // Remote SPM package mode: artifacts come from the remote package (SPM
+  // resolves + caches them) — skip Maven download + the local artifacts pkg.
+  const remote = remotePackageConfig(appRoot);
+  if (remote == null) {
+    try {
+      const artifactsDir = prepareLocalXcframeworkArtifacts(
+        args,
+        appRoot,
+        version,
+      );
+      resolvedArtifactsDir = await ensureArtifacts(args, version, artifactsDir);
+    } catch (e) {
+      logError(`Artifact setup failed: ${e.message}`);
+      process.exitCode = 1;
+      return;
+    }
 
-  try {
-    generateXcframeworksPackage(
-      args,
-      appRoot,
-      reactNativeRoot,
-      version,
-      resolvedArtifactsDir,
-    );
-  } catch (e) {
-    logError(`generate-spm-package.js failed: ${e.message}`);
-    process.exitCode = 1;
-    return;
+    try {
+      generateXcframeworksPackage(
+        args,
+        appRoot,
+        reactNativeRoot,
+        version,
+        resolvedArtifactsDir,
+      );
+    } catch (e) {
+      logError(`generate-spm-package.js failed: ${e.message}`);
+      process.exitCode = 1;
+      return;
+    }
+  } else {
+    log(`Remote ReactNative package: ${remote.url} @ ${remote.version}`);
   }
 
   // (Re)install the static codegen Package.swift template once build/generated/ios exists.
   installSpmCodegenTemplate(appRoot, reactNativeRoot, {log});
 
   // Build the per-app generated-headers farm (vended as the ReactAppHeaders
-  // SPM target inside the codegen package) and write the path files the
-  // generated manifests read at SPM-eval time. React core headers need no
-  // trees — they live inside the composed artifacts (generate-spm-package).
-  const headerSlotVersion = await resolveCacheSlotVersion(
-    args.version ?? version,
-  );
+  // SPM target inside the codegen package). React core headers need no trees
+  // — they live inside the composed artifacts (generate-spm-package). The
+  // generated manifests are fully declarative (fixed-relative package paths),
+  // so no path-locator JSON is written.
   buildPerAppHeaderTree(appRoot, {log});
-  writeSharedPathsJson(
-    projectRoot,
-    headerSlotVersion,
-    args.version ?? version,
-    {log},
-  );
-  writeAppPathsJson(appRoot, {log});
 
   let migrationRename /*: {from: string, to: string} | null */ = null;
   if (action === 'init') {

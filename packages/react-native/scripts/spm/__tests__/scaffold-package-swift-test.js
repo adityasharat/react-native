@@ -277,10 +277,11 @@ describe('emitScaffoldedPackageSwift', () => {
     expect(out).toContain('// Cache slot: 0.87.0-nightly-20260513-abc/debug');
   });
 
-  it('emits the appRoot walk-up Swift helper so the file works at any node_modules depth', () => {
+  it('is fully declarative — no runtime discovery code, no Foundation import', () => {
     const out = emitScaffoldedPackageSwift(baseSpec());
-    expect(out).toContain('let packageDir = URL(fileURLWithPath: #filePath)');
-    expect(out).toContain('build/xcframeworks/Package.swift');
+    expect(out).not.toContain('import Foundation');
+    expect(out).not.toContain('#filePath');
+    expect(out).not.toContain('FileManager');
   });
 
   it('emits a header-search-path directive per podspec entry (.headerSearchPath("common/cpp"))', () => {
@@ -290,28 +291,60 @@ describe('emitScaffoldedPackageSwift', () => {
     expect(out).toContain('.headerSearchPath("common/cpp")');
   });
 
-  it('declares the ReactNative package + product when coreReactNative is true', () => {
-    const out = emitScaffoldedPackageSwift(baseSpec({coreReactNative: true}));
+  it('declares the ReactNative package + product via scaffold-time relative paths when coreReactNative is true', () => {
+    const out = emitScaffoldedPackageSwift(baseSpec({coreReactNative: true}), {
+      cacheSlotLabel: null,
+      remote: null,
+      codegenPackageDir: '../../ios/build/generated/ios',
+      localXcfwPackageDir: '../../ios/build/xcframeworks',
+    });
     expect(out).toContain(
-      '.package(name: "ReactNative", path: appRoot + "/build/xcframeworks")',
+      '.package(name: "ReactNative", path: "../../ios/build/xcframeworks")',
+    );
+    expect(out).toContain(
+      '.package(name: "React-GeneratedCode", path: "../../ios/build/generated/ios")',
     );
     expect(out).toContain(
       '.product(name: "ReactNative", package: "ReactNative")',
     );
   });
 
-  it('emits sibling .package(path: siblingPath("...")) + .product entries for sibling RN deps', () => {
+  it('throws when coreReactNative is set but no codegenPackageDir was provided', () => {
+    expect(() =>
+      emitScaffoldedPackageSwift(baseSpec({coreReactNative: true})),
+    ).toThrow(/codegenPackageDir is required/);
+  });
+
+  it('remote mode: declares .package(url:exact:) and needs no local xcframeworks path', () => {
+    const out = emitScaffoldedPackageSwift(baseSpec({coreReactNative: true}), {
+      cacheSlotLabel: null,
+      remote: {
+        url: 'https://github.com/facebook/react-native-apple',
+        version: '0.87.0',
+        identity: 'react-native-apple',
+      },
+      codegenPackageDir: '../../ios/build/generated/ios',
+      localXcfwPackageDir: null,
+    });
+    expect(out).toContain(
+      '.package(url: "https://github.com/facebook/react-native-apple", exact: "0.87.0")',
+    );
+    expect(out).toContain(
+      '.product(name: "ReactNative", package: "react-native-apple")',
+    );
+    expect(out).not.toContain('build/xcframeworks');
+  });
+
+  it('emits sibling .package(path: "../<name>") + .product entries for sibling RN deps', () => {
     const out = emitScaffoldedPackageSwift(
       baseSpec({siblingNames: ['react-native-worklets']}),
     );
     expect(out).toContain(
-      '.package(name: "ReactNativeWorklets", path: siblingPath("react-native-worklets"))',
+      '.package(name: "ReactNativeWorklets", path: "../react-native-worklets")',
     );
     expect(out).toContain(
       '.product(name: "ReactNativeWorklets", package: "ReactNativeWorklets")',
     );
-    // siblingPath helper itself
-    expect(out).toContain('func siblingPath(_ name: String) -> String');
   });
 
   it('emits sources: array when podspec declared globs', () => {

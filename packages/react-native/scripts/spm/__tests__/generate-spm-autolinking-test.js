@@ -167,13 +167,36 @@ describe('generateSynthPackageSwift', () => {
     );
   });
 
-  it('depends on ReactNative via appRoot (from spm-paths.json) + /build/xcframeworks', () => {
+  it('depends on ReactNative via a fixed relative path (default synth depth)', () => {
     const result = generateSynthPackageSwift(baseSpec({hasReactDep: true}));
     expect(result).toContain(
-      '.package(name: "ReactNative", path: appRoot + "/build/xcframeworks")',
+      '.package(name: "ReactNative", path: "../../../../xcframeworks")',
+    );
+    expect(result).toContain(
+      '.package(name: "React-GeneratedCode", path: "../../../ios")',
     );
     expect(result).toContain(
       '.product(name: "ReactNative", package: "ReactNative")',
+    );
+    // Fully declarative — no runtime discovery, no Foundation import.
+    expect(result).not.toContain('import Foundation');
+    expect(result).not.toContain('spm-paths.json');
+    expect(result).not.toContain('#filePath');
+  });
+
+  it('honors caller-supplied reactNativePackagePath / codegenPackagePath', () => {
+    const result = generateSynthPackageSwift(
+      baseSpec({
+        hasReactDep: true,
+        reactNativePackagePath: '../../rel/xcframeworks',
+        codegenPackagePath: '../../rel/ios',
+      }),
+    );
+    expect(result).toContain(
+      '.package(name: "ReactNative", path: "../../rel/xcframeworks")',
+    );
+    expect(result).toContain(
+      '.package(name: "React-GeneratedCode", path: "../../rel/ios")',
     );
   });
 
@@ -189,11 +212,8 @@ describe('generateSynthPackageSwift', () => {
     );
   });
 
-  it('serves React headers via product deps when hasXcfwHeaders is true', () => {
-    const result = generateSynthPackageSwift(baseSpec({hasXcfwHeaders: true}));
-    // The loader (rel "../..") reads spm-paths.json for appRoot only.
-    expect(result).toContain('packageDir + "/../../spm-paths.json"');
-    expect(result).toContain('let appRoot = rnSpmPaths.appRoot');
+  it('serves React headers via product deps (binaryTargets + ReactAppHeaders)', () => {
+    const result = generateSynthPackageSwift(baseSpec({hasReactDep: true}));
     expect(result).toContain(
       '.product(name: "ReactNativeHeaders", package: "ReactNative")',
     );
@@ -207,14 +227,7 @@ describe('generateSynthPackageSwift', () => {
     expect(result).not.toContain('-ivfsoverlay');
     expect(result).not.toContain('let xcfwHeaders');
     expect(result).not.toContain('let vfsOverlay');
-  });
-
-  it('covers deps/codegen via the binaryTargets (no separate depsHeaders -I)', () => {
-    const result = generateSynthPackageSwift(
-      baseSpec({hasXcfwHeaders: true, hasDepsHeaders: true}),
-    );
     expect(result).not.toContain('let depsHeaders');
-    expect(result).not.toContain('"-I", depsHeaders');
   });
 
   it('emits exclude list when given', () => {
@@ -244,29 +257,27 @@ describe('generateSynthPackageSwift', () => {
   // symlink in autolinked/ fails with NSFileNoSuchFileError).
   // -------------------------------------------------------------------------
 
-  it('derives appRoot from spm-paths.json via the loader (no baked absolute path)', () => {
+  it('emits no runtime discovery — fully declarative manifest', () => {
     const result = generateSynthPackageSwift({
       swiftName: 'MyDep',
       publicHeadersPath: 'include',
       hasReactDep: true,
-      hasXcfwHeaders: true,
       targetPath: '.',
     });
-    expect(result).toContain('let appRoot = rnSpmPaths.appRoot');
-    expect(result).toContain('packageDir + "/../../spm-paths.json"');
+    expect(result).not.toContain('rnSpmPaths');
+    expect(result).not.toContain('spm-paths.json');
+    expect(result).not.toContain('import Foundation');
     expect(result).toContain('path: "."');
   });
 
-  it('in-place mode: ReactNative dep path uses `appRoot + "/build/xcframeworks"` expression', () => {
+  it('in-place mode: ReactNative dep path uses the default fixed relative path', () => {
     const result = generateSynthPackageSwift({
       swiftName: 'MyDep',
       hasReactDep: true,
-      hasXcfwHeaders: true,
       targetPath: '.',
-      appRootAbsolute: '/abs/app/root',
     });
     expect(result).toContain(
-      '.package(name: "ReactNative", path: appRoot + "/build/xcframeworks")',
+      '.package(name: "ReactNative", path: "../../../../xcframeworks")',
     );
   });
 
@@ -274,9 +285,7 @@ describe('generateSynthPackageSwift', () => {
     const result = generateSynthPackageSwift({
       swiftName: 'MyDep',
       hasReactDep: true,
-      hasXcfwHeaders: true,
       targetPath: '.',
-      appRootAbsolute: '/abs/app/root',
       spmDependencies: [{swiftName: 'CommonDep'}],
       siblingSynthAbsolutePaths: {CommonDep: '/abs/path/to/common'},
     });

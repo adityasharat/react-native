@@ -57,7 +57,7 @@ const {
   expandSpmDependencies,
 } = require('./expand-spm-dependencies');
 const {readPodspec} = require('./read-podspec');
-const {makeLogger, renderRNPathsLoader, toSwiftName} = require('./spm-utils');
+const {makeLogger, remotePackageConfig, toSwiftName} = require('./spm-utils');
 const fs = require('fs');
 const path = require('path');
 const yargs = require('yargs');
@@ -69,12 +69,33 @@ const {log} = makeLogger('generate-spm-autolinking');
 // binaryTarget, every other namespace from the ReactNativeHeaders
 // binaryTarget, and the app's generated headers from the ReactAppHeaders
 // target in the codegen package.
+//
+// Remote mode (remotePackageConfig): the ReactNative-family products come
+// from the single remote package identity instead of the local path-based
+// package, so app + every library unify on one SPM-resolved version.
+let remoteCfg /*: ?{url: string, version: string, identity: string} */ = null;
+
+function reactNativePackageLabel() /*: string */ {
+  return remoteCfg != null ? remoteCfg.identity : 'ReactNative';
+}
+function reactNativePackageDecl(localDecl /*: string */) /*: string */ {
+  return remoteCfg != null
+    ? `.package(url: "${remoteCfg.url}", exact: "${remoteCfg.version}")`
+    : localDecl;
+}
 function reactProductDeps() /*: string */ {
+  const rn = reactNativePackageLabel();
   return (
-    '.product(name: "ReactNative", package: "ReactNative")' +
-    ', .product(name: "ReactNativeHeaders", package: "ReactNative")' +
+    `.product(name: "ReactNative", package: "${rn}")` +
+    `, .product(name: "ReactNativeHeaders", package: "${rn}")` +
     ', .product(name: "ReactAppHeaders", package: "React-GeneratedCode")'
   );
+}
+
+// Normalize a (possibly Windows) path to posix separators for embedding in
+// a Package.swift `.package(path:)` literal — SPM expects forward slashes.
+function toPosix(p /*: string */) /*: string */ {
+  return p.split(path.sep).join('/');
 }
 
 function parseArgs(argv /*: Array<string> */) /*: AutolinkingArgs */ {
@@ -594,12 +615,12 @@ function autolinkingDepToSpmTarget(
  * Generates the full autolinked/Package.swift content.
  *
  * xcframeworksRelPath – path to the xcframeworks sub-package relative to the
- *   autolinked/ directory (e.g. "../build/xcframeworks").  When non-null a
- *   React dependency is declared and each target gets two `-I`s (the shared
- *   RN-core/deps tree + the per-app codegen/autolinking tree, from
- *   spm-paths.json) — which together cover React, deps, codegen, and autolinking
- *   headers — so <React/...>, <ReactCommon/...>, <react/renderer/...>,
- *   folly/glog/boost, and <ReactCodegen/...> all resolve.
+ *   autolinked/ directory (e.g. "../build/xcframeworks"). When non-null a
+ *   React dependency is declared. Headers need no search paths — React/react
+ *   come from the React binaryTarget, every other namespace from
+ *   ReactNativeHeaders, and the app's generated headers from the
+ *   ReactAppHeaders product — so <React/...>, <ReactCommon/...>,
+ *   <react/renderer/...>, folly/glog/boost, and <ReactCodegen/...> all resolve.
  */
 /**
  * Top-level autolinked/Package.swift — a thin aggregator that references each
@@ -632,7 +653,9 @@ function generateAutolinkedPackageSwift(
     typeof xcframeworksRelPath === 'string'
   ) {
     packageDeps.push(
-      `.package(name: "ReactNative", path: "${xcframeworksRelPath}")`,
+      reactNativePackageDecl(
+        `.package(name: "ReactNative", path: "${xcframeworksRelPath}")`,
+      ),
     );
     // Per-app generated headers come from the ReactAppHeaders product in
     // the codegen package (sibling of the autolinking dir).
@@ -714,12 +737,14 @@ ${packageDepsBlock}    targets: [
  * `root` directory symlink to the real source dir, so source files stay real
  * (Xcode atomic-save works).
  *
- * `appRoot` and the two header search paths are read from spm-paths.json at
- * SPM-eval time via the loader (rel = "../.." up to the autolinking dir), so the
- * manifest text holds no absolute paths. React/deps/codegen/autolinking angle
- * includes resolve via the two `-I`s (shared RN-core + per-app). Siblings use
- * their absolute synth path from `siblingSynthAbsolutePaths` (production) or a
- * `siblingPackageBaseRelative` fallback (tests).
+ * The React + codegen package references are plain relative paths supplied by
+ * the caller (`reactNativePackagePath` / `codegenPackagePath`), computed from
+ * the synth's fixed location under the autolinking dir — the manifest holds no
+ * runtime discovery and no absolute paths. Headers are served by the
+ * React/ReactNativeHeaders binaryTargets and the ReactAppHeaders product, so no
+ * search-path flags are needed. Siblings use their absolute synth path from
+ * `siblingSynthAbsolutePaths` (production) or a `siblingPackageBaseRelative`
+ * fallback (tests).
  */
 function generateSynthPackageSwift(spec /*: SynthPackageSpec */) /*: string */ {
   const swiftName /*: string */ = spec.swiftName;
@@ -735,7 +760,6 @@ function generateSynthPackageSwift(spec /*: SynthPackageSpec */) /*: string */ {
   const spmDependencies /*: Array<{swiftName: string}> */ =
     spec.spmDependencies ?? [];
   const hasReactDep /*: boolean */ = spec.hasReactDep !== false;
-  const hasXcfwHeaders /*: boolean */ = spec.hasXcfwHeaders === true;
   const resources /*: ?Array<string> */ = spec.resources;
   const isDynamic /*: boolean */ = spec.isDynamic !== false;
   const targetPath /*: string */ = spec.targetPath ?? `Sources/${swiftName}`;
@@ -743,18 +767,27 @@ function generateSynthPackageSwift(spec /*: SynthPackageSpec */) /*: string */ {
     spec.siblingSynthAbsolutePaths ?? {};
 
   // Package dependencies — ReactNative + each spm sibling synth package.
-  // `appRoot` comes from spm-paths.json via the loader (emitted below), so the
-  // React dep path is layout-independent. Siblings use their absolute synth path
-  // when the caller provides one (production); else a relative fallback.
+  // The React + codegen package paths are plain relative strings computed by
+  // the caller at generation time (the synth always lives at a fixed depth
+  // under the autolinking dir, and is regenerated on every `react-native
+  // spm` run), so the manifest holds no runtime discovery. Siblings use their
+  // absolute synth path when the caller provides one (production); else a
+  // relative fallback.
   const packageDeps /*: Array<string> */ = [];
   if (hasReactDep) {
+    const reactNativePackagePath /*: string */ =
+      spec.reactNativePackagePath ?? '../../../../xcframeworks';
+    const codegenPackagePath /*: string */ =
+      spec.codegenPackagePath ?? '../../../ios';
     packageDeps.push(
-      `.package(name: "ReactNative", path: appRoot + "/build/xcframeworks")`,
+      reactNativePackageDecl(
+        `.package(name: "ReactNative", path: "${reactNativePackagePath}")`,
+      ),
     );
     // Per-app generated headers come from the ReactAppHeaders product in
     // the codegen package.
     packageDeps.push(
-      `.package(name: "React-GeneratedCode", path: appRoot + "/build/generated/ios")`,
+      `.package(name: "React-GeneratedCode", path: "${codegenPackagePath}")`,
     );
   }
   for (const dep of spmDependencies) {
@@ -781,12 +814,6 @@ function generateSynthPackageSwift(spec /*: SynthPackageSpec */) /*: string */ {
       `.product(name: "${dep.swiftName}", package: "${dep.swiftName}")`,
     );
   }
-
-  // The loader provides appRoot + the two header vars from spm-paths.json. Emit
-  // it when the dep needs the React dep path or the `-I` flags. rel = "../.."
-  // because the synth lives at <autolinking>/packages/<Name>/.
-  const headerBlock =
-    hasReactDep || hasXcfwHeaders ? `${renderRNPathsLoader('../..')}\n\n` : '';
 
   const excludeLine =
     exclude.length > 0
@@ -831,9 +858,8 @@ function generateSynthPackageSwift(spec /*: SynthPackageSpec */) /*: string */ {
 // Synth Package.swift for autolinked dep "${swiftName}".
 
 import PackageDescription
-import Foundation
 
-${headerBlock}let package = Package(
+let package = Package(
     name: "${swiftName}",
     platforms: [.iOS(.v15)],
     products: [
@@ -857,6 +883,10 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
   // Resolve to absolute so path.join() produces absolute paths everywhere —
   // entryAbsDirs, the headers farm, etc. all assume an absolute appRoot.
   const appRoot = path.resolve(args.appRoot);
+  remoteCfg = remotePackageConfig(appRoot);
+  if (remoteCfg != null) {
+    log(`Remote ReactNative package: ${remoteCfg.url} @ ${remoteCfg.version}`);
+  }
 
   let rnRoot = args.reactNativeRoot;
   if (rnRoot == null) {
@@ -986,13 +1016,11 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
   // (xcframework symlinks), but the generated Swift code resolves paths at
   // Xcode build time, not generation time.
   let xcframeworksRelPath /*: string | null */ = null;
-  if (args.xcframeworksPath != null) {
-    const absXcfw = path.resolve(appRoot, args.xcframeworksPath);
-    xcframeworksRelPath = path.relative(outputDir, absXcfw);
-  } else {
-    const defaultXcfw = path.join(appRoot, 'build', 'xcframeworks');
-    xcframeworksRelPath = path.relative(outputDir, defaultXcfw);
-  }
+  const absXcframeworks /*: string */ =
+    args.xcframeworksPath != null
+      ? path.resolve(appRoot, args.xcframeworksPath)
+      : path.join(appRoot, 'build', 'xcframeworks');
+  xcframeworksRelPath = path.relative(outputDir, absXcframeworks);
 
   if (xcframeworksRelPath != null) {
     log(
@@ -1000,12 +1028,10 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
     );
   }
 
-  // Autolinked targets reference React/deps/codegen headers through the two
-  // split trees (shared RN-core + per-app), materialized by the spm-utils header
-  // builders and read from spm-paths.json. hasXcfwHeaders gates whether a target
-  // emits the `-I` flags at all.
+  // Whether autolinked targets declare a React dependency at all. Headers are
+  // served by the React/ReactNativeHeaders binaryTargets and the
+  // ReactAppHeaders product — no `-I` flags anywhere.
   const hasReactDep = xcframeworksRelPath != null;
-  const hasXcfwHeaders = xcframeworksRelPath != null;
 
   // Each entry gets a wrapper dir at <outputDir>/packages/<SwiftName>/ that
   // contains the synth Package.swift and a `root` directory symlink pointing
@@ -1186,7 +1212,19 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
         swiftName,
       })),
       hasReactDep,
-      hasXcfwHeaders,
+      // Relative paths from the synth dir (<outputDir>/packages/<Name>) to the
+      // app's React xcframeworks + codegen packages. Computed here because the
+      // synth's depth is fixed and it is regenerated every run — no runtime
+      // discovery needed in the manifest.
+      reactNativePackagePath: toPosix(
+        path.relative(wrapperDir, absXcframeworks),
+      ),
+      codegenPackagePath: toPosix(
+        path.relative(
+          wrapperDir,
+          path.join(appRoot, 'build', 'generated', 'ios'),
+        ),
+      ),
       isDynamic: false,
       targetPath: '.',
       siblingSynthAbsolutePaths,
@@ -1263,7 +1301,6 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
   const aggregatorContent = generateAutolinkedPackageSwift({
     npmDeps: aggregatorPackageDeps,
     hasReactDep,
-    hasXcfwHeaders,
     xcframeworksRelPath,
   });
   fs.mkdirSync(outputDir, {recursive: true});

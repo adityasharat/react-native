@@ -16,12 +16,10 @@ const {
   displayPath,
   makeLogger,
   readPackageJson,
-  renderRNPathsLoader,
   resolveReactNativeRoot,
   runCodegenAndInstallTemplate,
   sharedCacheDir,
   toSwiftName,
-  writeAppPathsJson,
 } = require('../spm-utils');
 const fs = require('fs');
 const os = require('os');
@@ -399,50 +397,5 @@ describe('per-app header farm (ReactAppHeaders SPM target)', () => {
     // No nested ReactAppHeaders/ReactAppHeaders self-fold artifacts.
     expect(fs.existsSync(path.join(perAppDir, 'ReactAppHeaders'))).toBe(false);
     expect(second.virtualPaths.has('MyLib/Provider.h')).toBe(true);
-  });
-
-  it('writes spm-paths.json with appRoot (headers need no paths)', () => {
-    writeAppPathsJson(appRoot);
-    const app = JSON.parse(
-      fs.readFileSync(
-        path.join(
-          appRoot,
-          'build',
-          'generated',
-          'autolinking',
-          'spm-paths.json',
-        ),
-        'utf8',
-      ),
-    );
-    expect(app.formatVersion).toBe(1);
-    expect(app.appRoot).toBe(appRoot);
-    expect(app.reactNativePackage).toBe(
-      path.join(appRoot, 'build', 'xcframeworks'),
-    );
-    // No header-search-path fields: resolution is product-dependency based.
-    expect(app.rnCoreHeaders).toBeUndefined();
-    expect(app.zeroIFrameworks).toBeUndefined();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// renderRNPathsLoader
-// ---------------------------------------------------------------------------
-describe('renderRNPathsLoader', () => {
-  it('emits a JSON loader reading spm-paths.json at the given relative path', () => {
-    const out = renderRNPathsLoader('../..');
-    expect(out).toContain('URL(fileURLWithPath: #filePath)');
-    expect(out).toContain('packageDir + "/../../spm-paths.json"');
-    expect(out).toContain('JSONDecoder().decode(RNSpmPaths.self');
-    expect(out).toContain('decoded.formatVersion == 1');
-    expect(out).toContain('let appRoot = rnSpmPaths.appRoot');
-    // Header-tree vars are gone — headers are served via product deps.
-    expect(out).not.toContain('rnCoreHeaders');
-    expect(out).not.toContain('appHeaders');
-  });
-
-  it('renders the same-dir path for an empty rel', () => {
-    expect(renderRNPathsLoader('')).toContain('packageDir + "/spm-paths.json"');
   });
 });

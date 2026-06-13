@@ -215,79 +215,57 @@ const PER_APP_HEADERS_REL = 'build/generated/ios/ReactAppHeaders';
 const SCAFFOLDER_MARKER =
   '// AUTO-SCAFFOLDED by react-native spm scaffold — safe to edit & commit via patch-package.';
 
-// The locally composed zero-I layout (see zero-i-compose.ensureZeroILayout):
-// generate-spm-package keeps it fresh from the cache slot whenever the slot's
-// artifacts don't already ship the spec layout. These helpers expose the
-// composed header roots for the community-manifest paths.json (grandfathered
-// `-I` contract — see writeSharedPathsJson).
-const ZERO_I_DIR = path.resolve(__dirname, '..', '..', 'build', 'zero-i');
-function composedHeaderRoots() /*: {react: ?string, rnh: ?string} */ {
-  const reactXcfw = path.join(ZERO_I_DIR, 'React.xcframework');
-  const rnhXcfw = path.join(ZERO_I_DIR, 'ReactNativeHeaders.xcframework');
-  let react = null;
-  let rnh = null;
-  try {
-    const slice = fs
-      .readdirSync(reactXcfw)
-      .find(d =>
-        fs.existsSync(path.join(reactXcfw, d, 'React.framework', 'Headers')),
-      );
-    if (slice != null) {
-      react = path.join(reactXcfw, slice, 'React.framework', 'Headers');
-    }
-  } catch {}
-  try {
-    const slice = fs
-      .readdirSync(rnhXcfw)
-      .find(d => fs.existsSync(path.join(rnhXcfw, d, 'Headers')));
-    if (slice != null) {
-      rnh = path.join(rnhXcfw, slice, 'Headers');
-    }
-  } catch {}
-  return {react, rnh};
+// Remote SPM package mode (prototype of the GitHub-distribution endgame):
+// when active, app + libraries all depend on ONE remote package identity
+// (`.package(url:exact:)`) instead of the local path-based artifacts package
+// — SPM unifies the version across the graph and the local compose/symlink
+// machinery is skipped. Activated via RN_SPM_REMOTE_URL +
+// RN_SPM_REMOTE_VERSION (persisted per-app so Xcode-phase re-syncs without
+// the env keep the mode).
+const REMOTE_CONFIG_REL = 'build/generated/autolinking/spm-remote.json';
+function remotePackageIdentity(url /*: string */) /*: string */ {
+  const tail = url.replace(/\/+$/, '').split('/').pop() ?? '';
+  return tail.replace(/\.git$/, '').toLowerCase();
 }
-
+function remotePackageConfig(
+  appRoot /*: string */,
+) /*: ?{url: string, version: string, identity: string} */ {
+  const envUrl = process.env.RN_SPM_REMOTE_URL;
+  const envVersion = process.env.RN_SPM_REMOTE_VERSION;
+  const cfgPath = path.join(appRoot, REMOTE_CONFIG_REL);
+  if (
+    envUrl != null &&
+    envUrl !== '' &&
+    envVersion != null &&
+    envVersion !== ''
+  ) {
+    fs.mkdirSync(path.dirname(cfgPath), {recursive: true});
+    fs.writeFileSync(
+      cfgPath,
+      JSON.stringify({url: envUrl, version: envVersion}, null, 2) + '\n',
+    );
+    return {
+      url: envUrl,
+      version: envVersion,
+      identity: remotePackageIdentity(envUrl),
+    };
+  }
+  if (fs.existsSync(cfgPath)) {
+    try {
+      const j = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+      if (typeof j.url === 'string' && typeof j.version === 'string') {
+        return {
+          url: j.url,
+          version: j.version,
+          identity: remotePackageIdentity(j.url),
+        };
+      }
+    } catch {}
+  }
+  return null;
+}
 function perAppHeadersDir(appRoot /*: string */) /*: string */ {
   return path.join(appRoot, PER_APP_HEADERS_REL);
-}
-
-/**
- * Renders the inlined Swift loader that every generated build-dir manifest
- * (aggregator, synth wrapper, codegen template) emits to read the per-app
- * spm-paths.json. `relPath` is the manifest's directory-relative path to the
- * `build/generated/autolinking/` dir that holds spm-paths.json ("" for the
- * aggregator, "../.." for a synth wrapper, "../autolinking" for codegen).
- *
- * Because the absolute paths live in the JSON and not in the manifest text, the
- * manifest is machine-independent and its SPM manifest hash stays stable across
- * machines and cache slots. File reads during manifest evaluation are supported
- * by SPM (the scaffolder already walks the filesystem at eval time).
- */
-function renderRNPathsLoader(relPath /*: string */) /*: string */ {
-  const rel = relPath === '' ? '' : `${relPath}/`;
-  return `let packageDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
-
-// Single source of truth for React Native paths (spm-paths.json, written by
-// \`npx react-native spm\`). Read here so this manifest's text holds no
-// absolute paths. Headers need no paths at all — they are served by the
-// React/ReactNativeHeaders binaryTargets and the ReactAppHeaders target.
-struct RNSpmPaths: Decodable {
-    let formatVersion: Int
-    let appRoot: String
-}
-let rnSpmPaths: RNSpmPaths = {
-    let url = URL(fileURLWithPath: packageDir + "/${rel}spm-paths.json").standardized
-    guard let data = try? Data(contentsOf: url),
-          let decoded = try? JSONDecoder().decode(RNSpmPaths.self, from: data) else {
-        fatalError("React Native SPM: cannot read \\(url.path). Run 'npx react-native spm' to (re)generate it.")
-    }
-    precondition(
-        decoded.formatVersion == 1,
-        "React Native SPM: spm-paths.json formatVersion \\(decoded.formatVersion) is unsupported (expected 1). Upgrade react-native or re-run 'npx react-native spm'."
-    )
-    return decoded
-}()
-let appRoot = rnSpmPaths.appRoot`;
 }
 
 /**
@@ -432,77 +410,6 @@ function buildPerAppHeaderTree(
 }
 
 /**
- * Writes the PER-APP single-source-of-truth spm-paths.json. Generated build-dir
- * manifests read it at SPM-eval time (appRoot — used to locate the ReactNative
- * and codegen packages). Header resolution itself needs NO paths: headers are
- * served by the React/ReactNativeHeaders binaryTargets and the ReactAppHeaders
- * SPM target. Holds machine-absolute paths.
- */
-function writeAppPathsJson(
-  appRoot /*: string */,
-  logger /*: {log: (msg: string) => void} */ = {log() {}},
-) /*: void */ {
-  const outDir = path.join(appRoot, 'build', 'generated', 'autolinking');
-  fs.mkdirSync(outDir, {recursive: true});
-  const json = {
-    formatVersion: 1,
-    appRoot,
-    // Retained for older scaffolded manifests that still decode it.
-    appHeaders: perAppHeadersDir(appRoot),
-    // The generated ReactNative binary-target package (React/Hermes/deps
-    // xcframeworks). Provided so consumer manifests can `.package(path:)` it
-    // without hardcoding the build/xcframeworks layout.
-    reactNativePackage: path.join(appRoot, 'build', 'xcframeworks'),
-    cxxStd: 'c++20',
-  };
-  fs.writeFileSync(
-    path.join(outDir, 'spm-paths.json'),
-    JSON.stringify(json, null, 2) + '\n',
-    'utf8',
-  );
-  logger.log('Wrote spm-paths.json');
-}
-
-/**
- * Writes the APP-INDEPENDENT repo-root .react-native/paths.json that
- * hand-authored community Package.swift files read (via nearest-ancestor walk)
- * for the shared RN-core `-I`. Holds machine-absolute paths — must be gitignored.
- */
-function writeSharedPathsJson(
-  projectRoot /*: string */,
-  slotVersion /*: string */,
-  reactNativeVersion /*: string */,
-  logger /*: {log: (msg: string) => void} */ = {log() {}},
-) /*: void */ {
-  const roots = composedHeaderRoots();
-  const outDir = path.join(projectRoot, '.react-native');
-  fs.mkdirSync(outDir, {recursive: true});
-  // Self-ignoring .gitignore: the whole .react-native/ dir is generated,
-  // machine-specific build state. A folder-local `*` keeps it out of git in
-  // every layout (single-app or monorepo, where .react-native/ sits at the
-  // project root above the app's own .gitignore). `*` also ignores this file
-  // itself, so the dir disappears from git entirely.
-  fs.writeFileSync(path.join(outDir, '.gitignore'), '*\n', 'utf8');
-  // GRANDFATHERED `-I` contract for hand-authored community manifests:
-  // rnCoreHeaders now points INSIDE the composed artifact (the one canonical
-  // React/react header root); rnhHeaders carries the remaining namespaces.
-  // The community-scaffold redesign (product-deps based) supersedes this.
-  const json = {
-    formatVersion: 1,
-    rnCoreHeaders: roots.react ?? '',
-    rnhHeaders: roots.rnh ?? '',
-    reactNativeVersion,
-    cacheSlot: slotVersion,
-  };
-  fs.writeFileSync(
-    path.join(outDir, 'paths.json'),
-    JSON.stringify(json, null, 2) + '\n',
-    'utf8',
-  );
-  logger.log('Wrote .react-native/paths.json');
-}
-
-/**
  * Runs React Native codegen and installs the SPM Package.swift template
  * into build/generated/ios/. Used by both setup-apple-spm.js and
  * sync-spm-autolinking.js.
@@ -513,11 +420,11 @@ function writeSharedPathsJson(
  * No-op when the template or the generated/ios dir is missing — codegen
  * may not have produced output yet, or the project may be SPM-only.
  *
- * The template is copied verbatim: it embeds the renderRNPathsLoader block,
- * which reads the two header-tree paths from spm-paths.json at SPM-eval time, so
- * there are no absolute/cache-slot paths in the manifest text to substitute. The
- * trees are refreshed per slot by the split header builders, while the manifest
- * text — and thus SPM's manifest hash — stays constant.
+ * The template is copied verbatim in local mode: it holds only fixed-relative
+ * `.package(path:)` references (it lives at a known depth inside the app), and
+ * headers come from the React/ReactNativeHeaders binaryTargets + the
+ * ReactAppHeaders product — no loader, no absolute paths. In remote mode the
+ * ReactNative path-dep is rewritten to the `.package(url:exact:)` identity.
  */
 function installSpmCodegenTemplate(
   appRoot /*: string */,
@@ -544,12 +451,23 @@ function installSpmCodegenTemplate(
   ) {
     return;
   }
-  fs.writeFileSync(
-    codegenPkgSwift,
-    fs.readFileSync(spmTemplate, 'utf8'),
-    'utf8',
+  let content = fs.readFileSync(spmTemplate, 'utf8');
+  // Remote mode: the codegen package depends on the remote ReactNative
+  // package identity instead of the local path-based artifacts package.
+  const remote = remotePackageConfig(appRoot);
+  if (remote != null) {
+    content = content
+      .replace(
+        '.package(name: "ReactNative", path: "../../xcframeworks"),',
+        `.package(url: "${remote.url}", exact: "${remote.version}"),`,
+      )
+      .split('package: "ReactNative")')
+      .join(`package: "${remote.identity}")`);
+  }
+  fs.writeFileSync(codegenPkgSwift, content, 'utf8');
+  logger.log(
+    'Installed SPM codegen template' + (remote != null ? ' (remote mode)' : ''),
   );
-  logger.log('Installed SPM codegen template');
 }
 
 function runCodegenAndInstallTemplate(
@@ -593,10 +511,7 @@ module.exports = {
   findProjectRoot,
   resolveReactNativeRoot,
   buildPerAppHeaderTree,
-  composedHeaderRoots,
-  writeAppPathsJson,
-  writeSharedPathsJson,
-  renderRNPathsLoader,
+  remotePackageConfig,
   installSpmCodegenTemplate,
   runCodegenAndInstallTemplate,
   SCAFFOLDER_MARKER,

@@ -38,7 +38,12 @@ import type {
 const {defaultReadConfig} = require('./expand-spm-dependencies');
 const {expandSpmSourceGlobs} = require('./generate-spm-autolinking');
 const {readPodspec} = require('./read-podspec');
-const {SCAFFOLDER_MARKER, makeLogger, toSwiftName} = require('./spm-utils');
+const {
+  SCAFFOLDER_MARKER,
+  makeLogger,
+  remotePackageConfig,
+  toSwiftName,
+} = require('./spm-utils');
 const fs = require('fs');
 const path = require('path');
 
@@ -62,13 +67,16 @@ const {log} = makeLogger('scaffold-package-swift');
 // header resolution moved to product dependencies (ReactNativeHeaders +
 // ReactAppHeaders binary/headers targets) — the rnCoreHeaders/appHeaders
 // trees no longer exist, so pre-v5 scaffolds carry dead lets and would break
-// if anything still referenced them.
+// if anything still referenced them. v7: the runtime appRoot walker and the
+// siblingPath helper are gone — package paths are plain relative strings
+// computed at scaffold time (the walker anchored on
+// build/xcframeworks/Package.swift, which remote mode no longer writes).
 //
 // Skip-rule contract: when an existing file's version is < this constant,
 // the scaffolder regenerates regardless of --force (the bump implies the
 // existing file is broken under current tooling). A file with the marker
 // but no version line is treated as v1.
-const SCAFFOLDER_VERSION = 5;
+const SCAFFOLDER_VERSION = 7;
 const SCAFFOLDER_VERSION_LINE_RE = /^\/\/ AUTO-SCAFFOLDED-VERSION: (\d+)$/m;
 
 const AUTOGEN_MARKER =
@@ -270,18 +278,29 @@ type EmitContext = {
   // active xcframework slot changes (otherwise cached evaluations would
   // keep pointing at the prior slot's headers).
   cacheSlotLabel: ?string,
+  // Remote SPM package mode (url/version/identity) — see remotePackageConfig.
+  remote?: ?{url: string, version: string, identity: string},
+  // Relative path (posix, from the dep's package dir) to the app's codegen
+  // package (<appRoot>/build/generated/ios). Computed at scaffold time —
+  // safe because the file is re-scaffolded per app/cache slot, and any
+  // node_modules relayout implies a reinstall that drops the file anyway.
+  codegenPackageDir?: ?string,
+  // Relative path to the app's local xcframeworks package
+  // (<appRoot>/build/xcframeworks). Only referenced when remote == null.
+  localXcfwPackageDir?: ?string,
 };
 */
 
 /**
  * Renders the SpmScaffoldSpec to a complete Package.swift string suitable
- * for writing into `node_modules/<dep>/`. Emits walk-up logic to find the
- * iOS app root at SPM evaluation time so the same file works regardless of
- * how deeply node_modules is hoisted (yarn workspaces, pnpm, plain npm).
+ * for writing into `node_modules/<dep>/`. Fully declarative: all package
+ * references are plain relative paths computed at scaffold time (no runtime
+ * discovery — the scaffolder knows both the dep dir and the app root, and
+ * re-scaffolds whenever either could have moved).
  */
 function emitScaffoldedPackageSwift(
   spec /*: SpmScaffoldSpec */,
-  ctx /*:: ?: EmitContext */ = {cacheSlotLabel: null},
+  ctx /*:: ?: EmitContext */ = {cacheSlotLabel: null, remote: null},
 ) /*: string */ {
   const slotComment =
     ctx.cacheSlotLabel != null ? `\n// Cache slot: ${ctx.cacheSlotLabel}` : '';
@@ -330,15 +349,37 @@ function emitScaffoldedPackageSwift(
   const packageDeps /*: Array<string> */ = [];
   const targetDeps /*: Array<string> */ = [];
   if (spec.coreReactNative) {
+    // Remote mode: React Native comes from the remote package identity (no
+    // app-layout knowledge). The per-app codegen package is generated INTO
+    // the app by definition, so it stays a path reference — relative,
+    // computed at scaffold time.
+    const remote = ctx.remote;
+    const rnLabel = remote != null ? remote.identity : 'ReactNative';
+    const codegenDir = ctx.codegenPackageDir;
+    if (codegenDir == null) {
+      throw new Error(
+        'emitScaffoldedPackageSwift: codegenPackageDir is required when the dep depends on React core.',
+      );
+    }
+    if (remote != null) {
+      packageDeps.push(
+        `.package(url: "${remote.url}", exact: "${remote.version}")`,
+      );
+    } else {
+      const xcfwDir = ctx.localXcfwPackageDir;
+      if (xcfwDir == null) {
+        throw new Error(
+          'emitScaffoldedPackageSwift: localXcfwPackageDir is required when no remote package is configured.',
+        );
+      }
+      packageDeps.push(`.package(name: "ReactNative", path: "${xcfwDir}")`);
+    }
     packageDeps.push(
-      '.package(name: "ReactNative", path: appRoot + "/build/xcframeworks")',
+      `.package(name: "React-GeneratedCode", path: "${codegenDir}")`,
     );
-    packageDeps.push(
-      '.package(name: "React-GeneratedCode", path: appRoot + "/build/generated/ios")',
-    );
-    targetDeps.push('.product(name: "ReactNative", package: "ReactNative")');
+    targetDeps.push(`.product(name: "ReactNative", package: "${rnLabel}")`);
     targetDeps.push(
-      '.product(name: "ReactNativeHeaders", package: "ReactNative")',
+      `.product(name: "ReactNativeHeaders", package: "${rnLabel}")`,
     );
     targetDeps.push(
       '.product(name: "ReactAppHeaders", package: "React-GeneratedCode")',
@@ -346,13 +387,12 @@ function emitScaffoldedPackageSwift(
   }
   for (const siblingName of spec.siblingNames) {
     const swiftSibling = toSwiftName(siblingName);
-    // Sibling deps live under <app>/node_modules — we don't know the exact
-    // hoisting layout from inside SPM. Use a relative path FROM the dep's
-    // dir to the sibling's dir, computed at SPM eval time via #filePath
-    // walks. For now, declare the sibling reference but compute its path
-    // via a Swift helper.
+    // Sibling deps share this package's node_modules parent dir (the same
+    // assumption the old runtime siblingPath helper made), so a literal
+    // relative path covers them — including scoped names, whose `/`
+    // resolves as a path segment.
     packageDeps.push(
-      `.package(name: "${swiftSibling}", path: siblingPath("${siblingName}"))`,
+      `.package(name: "${swiftSibling}", path: "../${siblingName}")`,
     );
     targetDeps.push(
       `.product(name: "${swiftSibling}", package: "${swiftSibling}")`,
@@ -388,55 +428,21 @@ function emitScaffoldedPackageSwift(
       ? `\n            dependencies: [${targetDeps.join(', ')}],`
       : '';
 
-  // The siblingPath helper is only emitted when sibling deps reference it.
-  const siblingPathHelper =
-    spec.siblingNames.length > 0
-      ? `// Compute the on-disk path to a sibling autolinked dep (same node_modules
-// root as this package). Used by .package(path:) below.
-func siblingPath(_ name: String) -> String {
-    let parent = URL(fileURLWithPath: packageDir).deletingLastPathComponent().path
-    return parent + "/" + name
-}
-
-`
-      : '';
-
   return `// swift-tools-version: 6.0
 ${SCAFFOLDER_MARKER}
 // AUTO-SCAFFOLDED-VERSION: ${SCAFFOLDER_VERSION}${slotComment}
 // Edit the contents below if needed and re-run \`npx patch-package <dep-name>\`
 // to persist across \`npm install\`. To regenerate from the podspec, remove
 // this file (or just this marker) and re-run \`npx react-native spm scaffold\`.
+//
+// Package references are plain relative paths, computed when this file was
+// scaffolded. They stay correct because the file is re-scaffolded per app
+// and cache slot, and any node_modules relayout reinstalls this package
+// (dropping the file) anyway.
 
 import PackageDescription
-import Foundation
 
-let packageDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
-
-// Walk up from packageDir to find the iOS app root, identified by the
-// presence of build/xcframeworks/Package.swift (written by
-// \`npx react-native spm\`). At each ancestor we check BOTH
-// \`<dir>/build/...\` (rn-tester / helloworld layout — SPM initialized at the
-// iOS dir directly) AND \`<dir>/ios/build/...\` (standard RN template with a
-// JS root plus an \`ios/\` subdir). Works regardless of how deeply
-// node_modules is hoisted.
-let appRoot: String = {
-    var dir = packageDir
-    let fm = FileManager.default
-    while true {
-        if fm.fileExists(atPath: dir + "/build/xcframeworks/Package.swift") {
-            return dir
-        }
-        if fm.fileExists(atPath: dir + "/ios/build/xcframeworks/Package.swift") {
-            return dir + "/ios"
-        }
-        let parent = URL(fileURLWithPath: dir).deletingLastPathComponent().path
-        if parent == dir { return packageDir }
-        dir = parent
-    }
-}()
-
-${siblingPathHelper}let package = Package(
+let package = Package(
     name: "${spec.swiftName}",
     platforms: [.iOS(.v15)],
     products: [
@@ -625,8 +631,18 @@ function scaffoldPackageSwiftForDep(
   }
 
   const spec = translatePodspecToSpmTarget(model, dep);
+  // Relative paths from the dep's package dir (where Package.swift lands)
+  // into the app — posix separators, as SPM expects.
+  const relFromDep = (...segments /*: Array<string> */) =>
+    path
+      .relative(dep.root, path.join(ctx.appRoot, ...segments))
+      .split(path.sep)
+      .join('/');
   const content = emitScaffoldedPackageSwift(spec, {
     cacheSlotLabel: ctx.cacheSlotLabel,
+    remote: remotePackageConfig(ctx.appRoot),
+    codegenPackageDir: relFromDep('build', 'generated', 'ios'),
+    localXcfwPackageDir: relFromDep('build', 'xcframeworks'),
   });
 
   // Distinguish "first-time scaffold" (no file at all) from "regenerate"
