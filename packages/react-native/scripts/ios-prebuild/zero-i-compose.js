@@ -141,6 +141,13 @@ function buildReactNativeHeadersXcframework(
   depsHeaders /*: string */,
   rnRoot /*: string */,
   includeCatalyst /*: boolean */ = false,
+  // Optional dir containing a `hermes/` namespace (the Hermes public C++ API
+  // headers, `destroot/include` from the hermes-ios tarball). Folded in as a
+  // textual namespace — like folly/glog, no clang module — so `<hermes/...>`
+  // resolves for any RN-linking target without per-library wiring. null when
+  // the Hermes headers aren't staged (then `<hermes/...>` stays unavailable,
+  // i.e. the pre-fold behavior).
+  hermesHeaders /*: ?string */ = null,
 ) /*: string */ {
   // ---- stage headers ----
   const stage = fs.mkdtempSync(path.join(outDir, '.rnh-stage-'));
@@ -155,6 +162,20 @@ function buildReactNativeHeadersXcframework(
       execSync(`/bin/cp -Rc "${src}" "${path.join(stage, ns)}"`);
     } else {
       console.warn(`zero-i-compose: deps namespace missing: ${ns}`);
+    }
+  }
+  // Hermes public headers (separate source from the deps namespaces — they
+  // come from the hermes-ios tarball, not ReactNativeDependencies). Vend only
+  // the `hermes/` namespace; `jsi/` is already provided elsewhere, so copying
+  // it here would double-vend.
+  let hermesFolded = false;
+  if (hermesHeaders != null) {
+    const src = path.join(hermesHeaders, 'hermes');
+    if (fs.existsSync(src)) {
+      execSync(`/bin/cp -Rc "${src}" "${path.join(stage, 'hermes')}"`);
+      hermesFolded = true;
+    } else {
+      console.warn(`zero-i-compose: hermes headers missing at ${src}`);
     }
   }
   fs.writeFileSync(
@@ -208,7 +229,8 @@ function buildReactNativeHeadersXcframework(
   fs.rmSync(work, {recursive: true, force: true});
   console.log(
     `zero-i-compose: ReactNativeHeaders.xcframework (${slices.map(s => s.name).join(', ')}) -> ${outXcfw} ` +
-      `(${plan.reactNativeHeaders.length} RN headers + deps ${plan.depsNamespaces.join(', ')}; ` +
+      `(${plan.reactNativeHeaders.length} RN headers + deps ${plan.depsNamespaces.join(', ')}` +
+      `${hermesFolded ? ', hermes' : ''}; ` +
       `${Object.keys(plan.namespaceModules).length} namespace modules)`,
   );
   return outXcfw;
@@ -240,12 +262,23 @@ function ensureZeroILayout(
     'ReactNativeDependencies.xcframework',
     'Headers',
   );
+  // Hermes public headers staged into the slot by download-spm-artifacts
+  // (the hermes-ios tarball ships them in destroot/include, which the
+  // xcframework extraction otherwise discards). null when absent — then
+  // ReactNativeHeaders composes without the hermes namespace.
+  const hermesHeadersDir = path.join(artifactsDir, 'hermes-headers');
+  const hermesHeaders = fs.existsSync(path.join(hermesHeadersDir, 'hermes'))
+    ? hermesHeadersDir
+    : null;
   const reactXcfw = path.join(outDir, 'React.xcframework');
   const headersXcfw = path.join(outDir, 'ReactNativeHeaders.xcframework');
   const markerPath = path.join(outDir, '.composed-from');
 
   const sourceStat = fs.statSync(path.join(sourceXcfw, 'Info.plist'));
-  const marker = `${sourceXcfw}\n${sourceStat.mtimeMs}\n`;
+  // Fold the hermes-headers presence into the marker so a slot that gains
+  // staged hermes headers (e.g. after a tooling upgrade re-downloads them)
+  // recomposes instead of reusing a hermes-less ReactNativeHeaders.
+  const marker = `${sourceXcfw}\n${sourceStat.mtimeMs}\n${hermesHeaders ?? 'no-hermes'}\n`;
   if (
     !force &&
     fs.existsSync(reactXcfw) &&
@@ -270,7 +303,14 @@ function ensureZeroILayout(
 
   const plan = computeSpecPlan(rnRoot);
   emitReactFrameworkHeaders(reactXcfw, plan, rnRoot);
-  buildReactNativeHeadersXcframework(outDir, plan, depsHeaders, rnRoot);
+  buildReactNativeHeadersXcframework(
+    outDir,
+    plan,
+    depsHeaders,
+    rnRoot,
+    false,
+    hermesHeaders,
+  );
   fs.writeFileSync(markerPath, marker);
   return {reactXcfw, headersXcfw};
 }

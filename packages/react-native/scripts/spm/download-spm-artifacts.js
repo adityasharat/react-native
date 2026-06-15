@@ -622,6 +622,86 @@ function findFirst(
 }
 
 /**
+ * The hermes-ios tarball ships its public C++ API headers in
+ * `destroot/include/hermes` alongside the framework — which extractXCFramework
+ * discards (it keeps only the .xcframework). Stage the `hermes/` namespace into
+ * `<outputDir>/hermes-headers/hermes` so zero-i-compose can fold it into
+ * ReactNativeHeaders (making `<hermes/hermes.h>` resolve for any RN-linking
+ * target). Only `hermes/` is staged — `jsi/` is already vended elsewhere.
+ * Best-effort: a tarball without these headers just leaves hermes unavailable.
+ */
+function stageHermesHeaders(
+  extractDir /*: string */,
+  outputDir /*: string */,
+) /*: void */ {
+  let includeDir = path.join(extractDir, 'destroot', 'include');
+  if (!fs.existsSync(path.join(includeDir, 'hermes', 'hermes.h'))) {
+    // Fall back to locating the include dir wherever it landed in the tarball.
+    const hit = findFirst(extractDir, name => name === 'include', 8);
+    if (hit != null) {
+      includeDir = hit;
+    }
+  }
+  const src = path.join(includeDir, 'hermes');
+  if (!fs.existsSync(path.join(src, 'hermes.h'))) {
+    log('  Hermes public headers not found in tarball — skipping header stage');
+    return;
+  }
+  const destRoot = path.join(outputDir, 'hermes-headers');
+  const dest = path.join(destRoot, 'hermes');
+  fs.rmSync(dest, {recursive: true, force: true});
+  fs.mkdirSync(destRoot, {recursive: true});
+  execSync(`/bin/cp -R "${src}" "${dest}"`, {stdio: 'pipe'});
+  log('  Staged Hermes public headers → hermes-headers/hermes');
+}
+
+/**
+ * Self-heal: stage Hermes headers into an already-extracted slot (the fast
+ * path skips extraction, so the headers were never staged). Prefers a CACHED
+ * hermes tarball (no network); downloads only as a last resort so the slot
+ * can't get stuck "incomplete" forever. No-op only when the headers can't be
+ * obtained at all (e.g. a missing local-tarball override).
+ */
+async function ensureHermesHeadersStaged(
+  url /*: string */,
+  downloadDir /*: string */,
+  sharedTarballName /*: ?string */,
+  outputDir /*: string */,
+) /*: Promise<void> */ {
+  const candidates = [
+    !/^https?:\/\//.test(url) ? url : null, // local-tarball override
+    path.join(downloadDir, url.split('/').pop() ?? ''),
+    sharedTarballName != null
+      ? path.join(sharedCacheDir(), sharedTarballName)
+      : null,
+  ].filter(Boolean);
+  let tarPath /*: ?string */ = candidates.find(
+    p => p != null && fs.existsSync(p),
+  );
+  if (tarPath == null) {
+    if (!/^https?:\/\//.test(url)) {
+      return; // local override missing — nothing to recover from
+    }
+    const localPath = path.join(
+      downloadDir,
+      url.split('/').pop() ?? 'hermes.tar.gz',
+    );
+    fs.mkdirSync(downloadDir, {recursive: true});
+    await download(url, localPath);
+    tarPath = localPath;
+  }
+  const tmp = path.join(outputDir, '.hermes-hdr-tmp');
+  fs.rmSync(tmp, {recursive: true, force: true});
+  fs.mkdirSync(tmp, {recursive: true});
+  try {
+    execSync(`tar -xzf "${tarPath}" -C "${tmp}"`, {stdio: 'pipe'});
+    stageHermesHeaders(tmp, outputDir);
+  } finally {
+    fs.rmSync(tmp, {recursive: true, force: true});
+  }
+}
+
+/**
  * Downloads a tarball, extracts the xcframework, and places it directly in
  * the output directory as <xcframeworkName>.xcframework/.
  *
@@ -660,6 +740,23 @@ async function processArtifact(
       onProgress(xcframeworkName, 0, 0, 0, true, 0);
     } else {
       log(`  Already extracted: ${xcframeworkName}.xcframework`);
+    }
+    // The xcframework is cached, but a slot from older tooling won't have the
+    // Hermes headers staged. Backfill them from a cached tarball (no network).
+    if (
+      label === 'hermes' &&
+      !fs.existsSync(path.join(outputDir, 'hermes-headers', 'hermes'))
+    ) {
+      try {
+        await ensureHermesHeadersStaged(
+          url,
+          downloadDir,
+          sharedTarballName,
+          outputDir,
+        );
+      } catch (e) {
+        log(`  Hermes header backfill failed (${e.message}) — continuing`);
+      }
     }
     return {label, version, xcframeworkPath: destXcfwPath, url};
   }
@@ -748,6 +845,17 @@ async function processArtifact(
     fs.renameSync(renamed, destXcfwPath);
   } else {
     fs.renameSync(xcfwPath, destXcfwPath);
+  }
+
+  // Hermes ships its public headers in the same tarball; stage them next to
+  // the xcframeworks so zero-i-compose can fold `hermes/` into
+  // ReactNativeHeaders. (Other artifacts have no such headers — no-op.)
+  if (label === 'hermes') {
+    try {
+      stageHermesHeaders(tmpExtractDir, outputDir);
+    } catch (e) {
+      log(`  Hermes header staging failed (${e.message}) — continuing`);
+    }
   }
 
   fs.rmSync(tmpExtractDir, {recursive: true, force: true});
@@ -1022,6 +1130,14 @@ function validateArtifactsCache(
     if (!fs.existsSync(entry.xcframeworkPath)) {
       return `xcframework for "${name}" not found at ${entry.xcframeworkPath}`;
     }
+  }
+  // The Hermes public headers must be staged for zero-i-compose to fold
+  // `<hermes/...>` into ReactNativeHeaders. A slot from older tooling won't
+  // have them — report incomplete so ensureArtifacts re-runs the download
+  // (which, with the xcframeworks already present, only backfills the headers
+  // from the cached tarball — no network re-download).
+  if (!fs.existsSync(path.join(artifactsDir, 'hermes-headers', 'hermes'))) {
+    return 'Hermes public headers not staged (hermes-headers/hermes)';
   }
   return null;
 }

@@ -215,6 +215,12 @@ function buildXCFrameworks(
     );
     const plan = computeSpecPlan(rootFolder);
     emitReactFrameworkHeaders(outputPath, plan, rootFolder);
+    // NOTE: the Hermes public headers (`<hermes/...>`) are folded into
+    // ReactNativeHeaders on the consumer side by zero-i-compose's
+    // ensureZeroILayout (it stages them from the hermes-ios tarball via
+    // download-spm-artifacts). When this prebuild publish path is
+    // productionized, pass the prebuild's hermes `destroot/include` dir as the
+    // 6th arg so the PUBLISHED ReactNativeHeaders carries hermes too.
     zeroIHeadersXcfw = buildReactNativeHeadersXcframework(
       path.dirname(outputPath),
       plan,
