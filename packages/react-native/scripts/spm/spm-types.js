@@ -326,6 +326,17 @@ export type PbxprojEntry = {
 
 export type PbxprojSections = {[string]: Array<PbxprojEntry>};
 
+// A preprocessor define lifted from a podspec's pod_target_xcconfig
+// (OTHER_CFLAGS `-D...` tokens + GCC_PREPROCESSOR_DEFINITIONS entries). `value`
+// is null for a bare `-DNAME` (define with no value); `config` scopes the
+// define to a build configuration (from `[config=*Debug*]`/`[config=*Release*]`
+// xcconfig keys), null = unconditional. Emitted as SPM `.define(...)`.
+export type PreprocessorDefine = {
+  name: string,
+  value: ?string,
+  config: ?('debug' | 'release'),
+};
+
 // ---------------------------------------------------------------------------
 // Scaffold types — for the `npx react-native spm scaffold` command that
 // generates a `Package.swift` into `node_modules/<dep>/` for community RN
@@ -363,6 +374,11 @@ export type PodspecModel = {
   // Raw header-search-path entries from `pod_target_xcconfig['HEADER_SEARCH_PATHS']`.
   // May contain Xcode build setting placeholders like `$(PODS_TARGET_SRCROOT)`.
   headerSearchPaths: Array<string>,
+  // Preprocessor defines lifted from pod_target_xcconfig OTHER_CFLAGS (`-D`
+  // tokens) + GCC_PREPROCESSOR_DEFINITIONS (incl. per-config variants). Already
+  // resolved by `pod ipc` (e.g. `-DWORKLETS_VERSION=#{package['version']}` →
+  // `WORKLETS_VERSION=0.9.2`). Emitted as `.define(...)` on the SPM target.
+  preprocessorDefines: Array<PreprocessorDefine>,
   // File paths or glob patterns the dep declares as bundled resources.
   resources: Array<string>,
   requiresArc: boolean,
@@ -389,6 +405,9 @@ export type SpmScaffoldSpec = {
   // Header search paths resolved to dep-root-relative form. Each entry
   // becomes `.headerSearchPath("<path>")` in cSettings + cxxSettings.
   headerSearchPaths: Array<string>,
+  // Preprocessor defines (resolved by pod ipc) — emitted as `.define(...)` in
+  // cSettings + cxxSettings, honoring any per-config scope.
+  preprocessorDefines: Array<PreprocessorDefine>,
   // Bucketed dependency references — pre-computed by the translation layer.
   // `coreReactNative` is true when ANY React-* / RCT* / RCT-Folly / glog
   // dep is present (so we add a single `.product(name: "ReactNative", ...)`).

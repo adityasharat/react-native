@@ -90,7 +90,7 @@ const {log} = makeLogger('scaffold-package-swift');
 // (reanimated's `s.dependency "RNWorklets"`) wired to their npm package. v11:
 // sibling .package path uses the libs/<SwiftName> symlink name, not the npm
 // name (fixes "package ... doesn't exist" on resolve).
-const SCAFFOLDER_VERSION = 11;
+const SCAFFOLDER_VERSION = 12;
 const SCAFFOLDER_VERSION_LINE_RE = /^\/\/ AUTO-SCAFFOLDED-VERSION: (\d+)$/m;
 
 const AUTOGEN_MARKER =
@@ -324,6 +324,7 @@ function translatePodspecToSpmTarget(
     swiftName,
     sources: expandedSources,
     headerSearchPaths,
+    preprocessorDefines: model.preprocessorDefines,
     coreReactNative,
     siblingNames,
     extraFrameworks: model.frameworks,
@@ -383,10 +384,31 @@ function emitScaffoldedPackageSwift(
   const headerSearchPathDirectives = spec.headerSearchPaths
     .map(p => `.headerSearchPath("${p}")`)
     .join(', ');
+
+  // Preprocessor defines → `.define("NAME", to: "VALUE", .when(...))`. The
+  // value is escaped as a Swift string literal because it may itself contain
+  // quotes (e.g. a string-literal macro `-DFOO="[A:false]"`).
+  const swiftStr = (s /*: string */) =>
+    `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  const defineDirectives = (spec.preprocessorDefines ?? [])
+    .map(d => {
+      const toPart = d.value != null ? `, to: ${swiftStr(d.value)}` : '';
+      const condPart =
+        d.config === 'debug'
+          ? ', .when(configuration: .debug)'
+          : d.config === 'release'
+            ? ', .when(configuration: .release)'
+            : '';
+      return `.define(${swiftStr(d.name)}${toPart}${condPart})`;
+    })
+    .join(', ');
+
   const settingsEntries = (extra /*: Array<string> */) => {
-    const parts = [headerSearchPathDirectives, ...extra].filter(
-      e => e.length > 0,
-    );
+    const parts = [
+      defineDirectives,
+      headerSearchPathDirectives,
+      ...extra,
+    ].filter(e => e.length > 0);
     return `[${parts.join(', ')}]`;
   };
   const cSettings = settingsEntries([]);

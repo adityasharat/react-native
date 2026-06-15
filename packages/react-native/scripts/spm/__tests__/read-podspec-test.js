@@ -201,6 +201,61 @@ describe('flattenSubspecs', () => {
     expect(model.partial).toBe(false);
   });
 
+  it('lifts preprocessor defines from OTHER_CFLAGS + GCC_PREPROCESSOR_DEFINITIONS (worklets shape)', () => {
+    const raw = {
+      name: 'RNWorklets',
+      version: '0.9.2',
+      pod_target_xcconfig: {
+        OTHER_CFLAGS:
+          '$(inherited) -DWORKLETS_FEATURE_FLAGS="[A:false][B:true]" -DWORKLETS_VERSION=0.9.2    ',
+        'GCC_PREPROCESSOR_DEFINITIONS[config=*Debug*]':
+          '$(inherited) HERMES_ENABLE_DEBUGGER=1',
+        'GCC_PREPROCESSOR_DEFINITIONS[config=*Release*]': '$(inherited)',
+      },
+    };
+    const model = flattenSubspecs(raw);
+    const byName = Object.fromEntries(
+      model.preprocessorDefines.map(d => [d.name, d]),
+    );
+    // Quoted string-literal value kept intact (incl. its quotes).
+    expect(byName.WORKLETS_FEATURE_FLAGS).toEqual({
+      name: 'WORKLETS_FEATURE_FLAGS',
+      value: '"[A:false][B:true]"',
+      config: null,
+    });
+    expect(byName.WORKLETS_VERSION).toEqual({
+      name: 'WORKLETS_VERSION',
+      value: '0.9.2',
+      config: null,
+    });
+    // Per-config define scoped to debug; $(inherited) dropped.
+    expect(byName.HERMES_ENABLE_DEBUGGER).toEqual({
+      name: 'HERMES_ENABLE_DEBUGGER',
+      value: '1',
+      config: 'debug',
+    });
+    expect(model.preprocessorDefines).toHaveLength(3);
+  });
+
+  it('drops non-define flags and unresolved tokens from OTHER_CFLAGS', () => {
+    const raw = {
+      name: 'foo',
+      version: '1',
+      pod_target_xcconfig: {
+        OTHER_CFLAGS:
+          '-Wno-comma -gen-cdb-fragment-path build/cdb -DGOOD=1 -D$(BAD_TOKEN)=x -DALSO_GOOD',
+      },
+    };
+    const model = flattenSubspecs(raw);
+    const names = model.preprocessorDefines.map(d => d.name).sort();
+    // Only the two valid -D defines survive; -W / -gen-cdb-fragment-path and
+    // the unresolved $(...) token are dropped.
+    expect(names).toEqual(['ALSO_GOOD', 'GOOD']);
+    expect(model.preprocessorDefines.find(d => d.name === 'ALSO_GOOD').value).toBe(
+      null,
+    );
+  });
+
   it('unions source_files across selected subspecs', () => {
     const raw = {
       name: 'foo',

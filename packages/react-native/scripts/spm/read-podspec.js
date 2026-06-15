@@ -10,7 +10,7 @@
 
 'use strict';
 
-/*:: import type {PodspecModel} from './spm-types'; */
+/*:: import type {PodspecModel, PreprocessorDefine} from './spm-types'; */
 
 /**
  * read-podspec.js — produces a flattened, SPM-friendly view of an iOS
@@ -315,6 +315,39 @@ function tokenizeFlags(value /*: string | null */) /*: Array<string> */ {
   return value.split(/\s+/).filter(Boolean);
 }
 
+/**
+ * Split a flag string on whitespace while keeping quoted spans intact, so a
+ * define like `-DWORKLETS_FEATURE_FLAGS="[A:false][B:true]"` stays one token
+ * (the quotes are part of the macro value). A naive whitespace split would
+ * shred any define whose value contains spaces.
+ */
+function shellTokenize(value /*: string */) /*: Array<string> */ {
+  const tokens /*: Array<string> */ = [];
+  let cur = '';
+  let quote /*: string | null */ = null;
+  let has = false;
+  for (let i = 0; i < value.length; i++) {
+    const c = value[i];
+    if (quote != null) {
+      cur += c;
+      if (c === quote) quote = null;
+    } else if (c === '"' || c === "'") {
+      cur += c;
+      quote = c;
+      has = true;
+    } else if (/\s/.test(c)) {
+      if (has) tokens.push(cur);
+      cur = '';
+      has = false;
+    } else {
+      cur += c;
+      has = true;
+    }
+  }
+  if (has) tokens.push(cur);
+  return tokens;
+}
+
 // ---------------------------------------------------------------------------
 // Subspec flattening
 // ---------------------------------------------------------------------------
@@ -413,6 +446,83 @@ function flattenSubspecs(rawSpec /*: RawSpec */) /*: PodspecModel */ {
     return Array.from(new Set(out));
   }
 
+  // Lift preprocessor defines from pod_target_xcconfig across all layers:
+  // `-D` tokens in OTHER_CFLAGS, and NAME[=VALUE] entries in
+  // GCC_PREPROCESSOR_DEFINITIONS (incl. per-config `[config=*Debug*]` keys).
+  // Non-define compiler flags in OTHER_CFLAGS are intentionally dropped — only
+  // `-D`s are safe to forward; arbitrary flags may be machine- or
+  // example-app-specific. $(inherited), unresolved $(...) tokens, and invalid
+  // C identifiers are skipped.
+  function mergePreprocessorDefines() /*: Array<PreprocessorDefine> */ {
+    const out /*: Array<PreprocessorDefine> */ = [];
+    const seen /*: Set<string> */ = new Set();
+    const validName = /^[A-Za-z_]\w*$/;
+    const add = (
+      name /*: string */,
+      value /*: ?string */,
+      config /*: ?('debug' | 'release') */,
+    ) => {
+      if (!validName.test(name)) return;
+      if (/\$[({]/.test(name) || (value != null && /\$[({]/.test(value))) {
+        return; // unresolved Xcode/Ruby token — don't emit a broken define
+      }
+      const key = `${name}|${config ?? ''}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({name, value, config});
+    };
+    for (const layer of layers) {
+      // $FlowFixMe[incompatible-use] layer narrowed from `mixed`
+      const xc =
+        layer != null && typeof layer === 'object'
+          ? layer.pod_target_xcconfig
+          : null;
+      if (xc == null || typeof xc !== 'object') continue;
+      for (const rawKey of Object.keys(xc)) {
+        const cflags = /^OTHER_CFLAGS(?:\[config=\*(\w+)\*\])?$/i.exec(rawKey);
+        const ppDefs =
+          /^GCC_PREPROCESSOR_DEFINITIONS(?:\[config=\*(\w+)\*\])?$/i.exec(
+            rawKey,
+          );
+        if (cflags == null && ppDefs == null) continue;
+        const cfgRaw = ((cflags?.[1] ?? ppDefs?.[1] ?? '') + '').toLowerCase();
+        const config =
+          cfgRaw === 'debug'
+            ? 'debug'
+            : cfgRaw === 'release'
+              ? 'release'
+              : null;
+        // $FlowFixMe[incompatible-use] xc value access is intentional
+        const val = xc[rawKey];
+        const strs =
+          typeof val === 'string'
+            ? [val]
+            : Array.isArray(val)
+              ? val.filter(v => typeof v === 'string')
+              : [];
+        for (const s of strs) {
+          for (const tok of shellTokenize(s)) {
+            if (tok === '$(inherited)') continue;
+            // OTHER_CFLAGS: only `-D` tokens are defines; others are flags.
+            // GCC_PREPROCESSOR_DEFINITIONS: every token is `NAME[=VALUE]`.
+            let body /*: ?string */ = null;
+            if (cflags != null) {
+              if (tok.startsWith('-D')) body = tok.slice(2);
+            } else {
+              body = tok;
+            }
+            if (body == null || body.length === 0) continue;
+            const eq = body.indexOf('=');
+            const name = eq >= 0 ? body.slice(0, eq) : body;
+            const value = eq >= 0 ? body.slice(eq + 1) : null;
+            add(name, value, config);
+          }
+        }
+      }
+    }
+    return out;
+  }
+
   function mergeDependencies() /*: Array<string> */ {
     const out /*: Array<string> */ = [];
     for (const layer of layers) {
@@ -483,6 +593,7 @@ function flattenSubspecs(rawSpec /*: RawSpec */) /*: PodspecModel */ {
     weakFrameworks: mergeArrayField('weak_frameworks'),
     libraries: mergeArrayField('libraries'),
     dependencies: mergeDependencies(),
+    preprocessorDefines: mergePreprocessorDefines(),
     compilerFlags: mergeCompilerFlags(),
     headerSearchPaths: mergeHeaderSearchPaths(),
     resources: mergeArrayField('resources'),

@@ -41,6 +41,7 @@ function podspec(overrides /*: Object */ = {}) {
     dependencies: [],
     compilerFlags: [],
     headerSearchPaths: [],
+    preprocessorDefines: [],
     resources: [],
     requiresArc: true,
     warnings: [],
@@ -348,6 +349,7 @@ describe('emitScaffoldedPackageSwift', () => {
       swiftName: 'foo',
       sources: [],
       headerSearchPaths: [],
+      preprocessorDefines: [],
       coreReactNative: false,
       siblingNames: [],
       extraFrameworks: [],
@@ -451,6 +453,33 @@ describe('emitScaffoldedPackageSwift', () => {
     expect(out).toContain(
       '.product(name: "ReactNativeWorklets", package: "ReactNativeWorklets")',
     );
+  });
+
+  it('emits preprocessor defines as .define(...) in c/cxx settings, escaping quoted values and honoring config', () => {
+    const out = emitScaffoldedPackageSwift(
+      baseSpec({
+        preprocessorDefines: [
+          {name: 'WORKLETS_VERSION', value: '0.9.2', config: null},
+          {
+            name: 'WORKLETS_FEATURE_FLAGS',
+            value: '"[A:false][B:true]"',
+            config: null,
+          },
+          {name: 'HERMES_ENABLE_DEBUGGER', value: '1', config: 'debug'},
+          {name: 'NDEBUG', value: null, config: 'release'},
+        ],
+      }),
+    );
+    expect(out).toContain('.define("WORKLETS_VERSION", to: "0.9.2")');
+    // Embedded quotes escaped for the Swift string literal.
+    expect(out).toContain(
+      '.define("WORKLETS_FEATURE_FLAGS", to: "\\"[A:false][B:true]\\"")',
+    );
+    expect(out).toContain(
+      '.define("HERMES_ENABLE_DEBUGGER", to: "1", .when(configuration: .debug))',
+    );
+    // Valueless define + release config.
+    expect(out).toContain('.define("NDEBUG", .when(configuration: .release))');
   });
 
   it('emits sources: array when podspec declared globs', () => {
@@ -825,6 +854,7 @@ describe('SCAFFOLDER_VERSION', () => {
       swiftName: 'foo',
       sources: [],
       headerSearchPaths: [],
+      preprocessorDefines: [],
       coreReactNative: false,
       siblingNames: [],
       extraFrameworks: [],
