@@ -346,6 +346,10 @@ export type PodspecModel = {
   privateHeaderFiles: Array<string>,
   excludeFiles: Array<string>,
   headerMappingsDir: ?string,
+  // Every subspec's header_mappings_dir (union). dirname() of each is added as
+  // a header search path so `<namespace/...>` includes resolve from the
+  // physical source tree (SPM has no header_mappings_dir copy step).
+  headerMappingsDirs: Array<string>,
   headerDir: ?string,
   frameworks: Array<string>,
   weakFrameworks: Array<string>,

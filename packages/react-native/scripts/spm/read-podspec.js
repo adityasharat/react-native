@@ -471,6 +471,13 @@ function flattenSubspecs(rawSpec /*: RawSpec */) /*: PodspecModel */ {
     privateHeaderFiles: mergeArrayField('private_header_files'),
     excludeFiles: mergeArrayField('exclude_files'),
     headerMappingsDir: mergeStringField('header_mappings_dir'),
+    // ALL subspecs' header_mappings_dir values (not just the merged one). Each
+    // implies a header search path of its parent dir so namespaced includes
+    // (`<reanimated/apple/sensor/X.h>` for a header physically at
+    // `apple/reanimated/apple/sensor/X.h` with mappings dir `apple/reanimated`)
+    // resolve from the physical tree — CocoaPods does this via the
+    // header_mappings_dir copy step, which SPM has no equivalent for.
+    headerMappingsDirs: mergeArrayField('header_mappings_dir'),
     headerDir: mergeStringField('header_dir'),
     frameworks: mergeArrayField('frameworks'),
     weakFrameworks: mergeArrayField('weak_frameworks'),

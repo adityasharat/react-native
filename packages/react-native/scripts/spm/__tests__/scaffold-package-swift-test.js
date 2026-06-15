@@ -33,6 +33,7 @@ function podspec(overrides /*: Object */ = {}) {
     privateHeaderFiles: [],
     excludeFiles: [],
     headerMappingsDir: null,
+    headerMappingsDirs: [],
     headerDir: null,
     frameworks: [],
     weakFrameworks: [],
@@ -81,6 +82,60 @@ describe('translatePodspecToSpmTarget', () => {
       autolinkedDep({name: 'react-native-safe-area-context'}),
     );
     expect(spec.swiftName).toBe('ReactNativeSafeAreaContext');
+  });
+
+  it('adds dirname(header_mappings_dir) as a header search path so namespaced includes resolve (reanimated/worklets pattern)', () => {
+    // reanimated/worklets ship headers at `apple/reanimated/...` and
+    // `Common/cpp/reanimated/...` with per-subspec header_mappings_dir, and
+    // include them as `<reanimated/...>`. SPM has no header_mappings_dir copy
+    // step, so the parent of each mappings dir must be on the search path.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rea-scaffold-'));
+    try {
+      fs.mkdirSync(path.join(root, 'apple', 'reanimated'), {recursive: true});
+      fs.mkdirSync(path.join(root, 'Common', 'cpp', 'reanimated'), {
+        recursive: true,
+      });
+      const model = podspec({
+        headerMappingsDirs: ['Common/cpp/reanimated', 'apple/reanimated'],
+      });
+      const spec = translatePodspecToSpmTarget(
+        model,
+        autolinkedDep({name: 'react-native-reanimated', root}),
+      );
+      expect(spec.headerSearchPaths).toContain('apple');
+      expect(spec.headerSearchPaths).toContain('Common/cpp');
+    } finally {
+      fs.rmSync(root, {recursive: true, force: true});
+    }
+  });
+
+  it('skips a header_mappings_dir whose parent dir does not exist on disk', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rea-scaffold-'));
+    try {
+      const model = podspec({headerMappingsDirs: ['nope/reanimated']});
+      const spec = translatePodspecToSpmTarget(
+        model,
+        autolinkedDep({name: 'react-native-foo', root}),
+      );
+      expect(spec.headerSearchPaths).not.toContain('nope');
+    } finally {
+      fs.rmSync(root, {recursive: true, force: true});
+    }
+  });
+
+  it('does not add "." for a single-segment header_mappings_dir', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rea-scaffold-'));
+    try {
+      fs.mkdirSync(path.join(root, 'ios'), {recursive: true});
+      const model = podspec({headerMappingsDirs: ['ios']});
+      const spec = translatePodspecToSpmTarget(
+        model,
+        autolinkedDep({name: 'react-native-foo', root}),
+      );
+      expect(spec.headerSearchPaths).not.toContain('.');
+    } finally {
+      fs.rmSync(root, {recursive: true, force: true});
+    }
   });
 
   it('still uses toSwiftName(npm-name) even when header_dir is a plain identifier (matches autolinker registration)', () => {

@@ -83,7 +83,7 @@ const {log} = makeLogger('scaffold-package-swift');
 // v8: relative app paths (codegen / xcframeworks) are now computed from the
 // autolinker's libs/<SwiftName> symlink location instead of the real dep.root,
 // fixing a doubled-path resolution failure on fresh SwiftPM resolves.
-const SCAFFOLDER_VERSION = 8;
+const SCAFFOLDER_VERSION = 9;
 const SCAFFOLDER_VERSION_LINE_RE = /^\/\/ AUTO-SCAFFOLDED-VERSION: (\d+)$/m;
 
 const AUTOGEN_MARKER =
@@ -170,6 +170,27 @@ function translatePodspecToSpmTarget(
     const cleaned = substituted.replace(/^\.\//, '').replace(/^\//, '');
     if (cleaned.length > 0 && !headerSearchPaths.includes(cleaned)) {
       headerSearchPaths.push(cleaned);
+    }
+  }
+
+  // header_mappings_dir → search path. CocoaPods exposes a subspec's headers
+  // under `<basename(mappings_dir)>/...` by copying them into Pods/Headers
+  // preserving structure relative to the mappings dir. SPM has no such copy
+  // step, so namespaced includes like `<reanimated/apple/sensor/X.h>` (header
+  // physically at `apple/reanimated/apple/sensor/X.h`, mappings dir
+  // `apple/reanimated`) only resolve if the mappings dir's PARENT (`apple`) is
+  // on the search path. Add dirname() of every subspec's mappings dir.
+  for (const mappingsDir of model.headerMappingsDirs) {
+    const parent = path.posix.dirname(mappingsDir.replace(/^\.\//, ''));
+    // dirname of a single-segment dir is "." (root) — already implicitly
+    // searched; skip it and anything that doesn't exist on disk.
+    if (
+      parent.length > 0 &&
+      parent !== '.' &&
+      !headerSearchPaths.includes(parent) &&
+      fs.existsSync(path.join(dep.root, parent))
+    ) {
+      headerSearchPaths.push(parent);
     }
   }
 
