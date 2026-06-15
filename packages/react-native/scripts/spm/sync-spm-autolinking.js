@@ -39,6 +39,7 @@ const {
 const {main: generateAutolinking} = require('./generate-spm-autolinking');
 const {main: generatePackage} = require('./generate-spm-package');
 const {
+  RemoteVersionError,
   buildPerAppHeaderTree,
   defaultCacheDir,
   displayPath,
@@ -179,6 +180,14 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
 
 if (require.main === module) {
   main().catch(e => {
+    if (e instanceof RemoteVersionError) {
+      // Clean message + exit 2 (the build phase hard-fails on it) instead of a
+      // stack trace, matching how setup-apple-spm.js surfaces remote-mode
+      // version errors.
+      log(e.message);
+      process.exitCode = 2;
+      return;
+    }
     console.error(e);
     process.exitCode = 1;
   });

@@ -227,42 +227,153 @@ function remotePackageIdentity(url /*: string */) /*: string */ {
   const tail = url.replace(/\/+$/, '').split('/').pop() ?? '';
   return tail.replace(/\.git$/, '').toLowerCase();
 }
+
+/**
+ * Thrown by remotePackageConfig when remote SPM mode is active (a URL is set)
+ * but no usable RN version can be determined: react-native isn't installed, or
+ * the installed version is a non-publishable dev placeholder (e.g. the monorepo
+ * '1000.0.0', which has no remote tag) and no override was supplied. Carries a
+ * developer-facing message; the CLI turns it into a hard build error (exit 2).
+ */
+class RemoteVersionError extends Error {
+  constructor(message /*: string */) {
+    super(message);
+    this.name = 'RemoteVersionError';
+  }
+}
+
+/**
+ * Resolve the version of the installed react-native by walking up from appRoot
+ * looking for node_modules/react-native/package.json. Mirrors the autolinker's
+ * appRoot-first, up-to-5-ancestors walk-up. Returns null when not found or the
+ * package.json has no string version.
+ */
+function resolveInstalledRnVersion(appRoot /*: string */) /*: ?string */ {
+  let dir = path.resolve(appRoot);
+  for (let i = 0; i <= 5; i++) {
+    const pkgPath = path.join(
+      dir,
+      'node_modules',
+      'react-native',
+      'package.json',
+    );
+    if (fs.existsSync(pkgPath)) {
+      try {
+        const j = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        if (typeof j.version === 'string') {
+          return j.version;
+        }
+      } catch {}
+      return null;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) {
+      break;
+    }
+    dir = parent;
+  }
+  return null;
+}
+
+/**
+ * True when a version string can be resolved to a published remote tag. False
+ * for the monorepo dev placeholder ('1000.0.0') and 0.0.0-* dev builds, neither
+ * of which is published — in remote mode these require an explicit override.
+ */
+function isPublishableVersion(v /*: ?string */) /*: boolean */ {
+  if (v == null || v === '') {
+    return false;
+  }
+  if (v === '1000.0.0') {
+    return false;
+  }
+  if (/^0\.0\.0(-|$)/.test(v)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Resolve the remote SPM package config for `appRoot`, or null for local mode.
+ *
+ * Remote mode is gated by a URL alone (env RN_SPM_REMOTE_URL or persisted
+ * `url`). The version is an OVERRIDE chain — env RN_SPM_REMOTE_VERSION →
+ * persisted `versionOverride` → legacy persisted `version` (back-compat) — and
+ * when no override is set it is DERIVED from the installed react-native. The
+ * derived value is never persisted, so an npm RN upgrade auto-re-pins the SPM
+ * graph on the next sync. A derived version that isn't publishable (or a
+ * missing RN install) throws RemoteVersionError so the dev placeholder doesn't
+ * silently pin an unpublished tag.
+ */
 function remotePackageConfig(
   appRoot /*: string */,
 ) /*: ?{url: string, version: string, identity: string} */ {
   const envUrl = process.env.RN_SPM_REMOTE_URL;
   const envVersion = process.env.RN_SPM_REMOTE_VERSION;
   const cfgPath = path.join(appRoot, REMOTE_CONFIG_REL);
-  if (
-    envUrl != null &&
-    envUrl !== '' &&
-    envVersion != null &&
-    envVersion !== ''
-  ) {
-    fs.mkdirSync(path.dirname(cfgPath), {recursive: true});
-    fs.writeFileSync(
-      cfgPath,
-      JSON.stringify({url: envUrl, version: envVersion}, null, 2) + '\n',
-    );
-    return {
-      url: envUrl,
-      version: envVersion,
-      identity: remotePackageIdentity(envUrl),
-    };
-  }
+
+  // Read any persisted config first. Legacy {url, version} (where `version`
+  // was a hard pin) is read with `version` honored as an override.
+  let persisted /*: {url?: string, versionOverride?: string, version?: string} */ =
+    {};
   if (fs.existsSync(cfgPath)) {
     try {
       const j = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-      if (typeof j.url === 'string' && typeof j.version === 'string') {
-        return {
-          url: j.url,
-          version: j.version,
-          identity: remotePackageIdentity(j.url),
-        };
+      if (j != null && typeof j === 'object') {
+        persisted = j;
       }
     } catch {}
   }
-  return null;
+
+  // URL alone activates remote mode (env wins over persisted).
+  const url = envUrl != null && envUrl !== '' ? envUrl : persisted.url;
+  if (url == null || url === '') {
+    return null; // local mode
+  }
+
+  // Version override chain. When none is set, derive from the installed RN —
+  // the SPM graph must compile against the same RN the JS/native code uses.
+  const override =
+    envVersion != null && envVersion !== ''
+      ? envVersion
+      : (persisted.versionOverride ?? persisted.version);
+  const version = override ?? resolveInstalledRnVersion(appRoot);
+
+  if (version == null) {
+    throw new RemoteVersionError(
+      `Remote SPM mode is on (URL=${url}) but no React Native version could ` +
+        'be resolved (react-native was not found in node_modules). Set ' +
+        'RN_SPM_REMOTE_VERSION to a published tag, or install react-native.',
+    );
+  }
+  if (override == null && !isPublishableVersion(version)) {
+    throw new RemoteVersionError(
+      `Remote SPM mode is on (URL=${url}) but React Native resolves to ` +
+        `non-publishable version '${version}'. Set RN_SPM_REMOTE_VERSION to a ` +
+        'published tag, or install a released react-native.',
+    );
+  }
+
+  // Persist {url, versionOverride?} only when env-driven (matching the prior
+  // behavior of capturing env so Xcode-phase re-syncs keep the mode). A derived
+  // version is never frozen: omit versionOverride so the next run re-derives.
+  const envDriven =
+    (envUrl != null && envUrl !== '') ||
+    (envVersion != null && envVersion !== '');
+  if (envDriven) {
+    const toPersist /*: {url: string, versionOverride?: string} */ = {url};
+    if (override != null) {
+      toPersist.versionOverride = override;
+    }
+    fs.mkdirSync(path.dirname(cfgPath), {recursive: true});
+    fs.writeFileSync(cfgPath, JSON.stringify(toPersist, null, 2) + '\n');
+  }
+
+  return {
+    url,
+    version,
+    identity: remotePackageIdentity(url),
+  };
 }
 function perAppHeadersDir(appRoot /*: string */) /*: string */ {
   return path.join(appRoot, PER_APP_HEADERS_REL);
@@ -512,6 +623,9 @@ module.exports = {
   resolveReactNativeRoot,
   buildPerAppHeaderTree,
   remotePackageConfig,
+  resolveInstalledRnVersion,
+  isPublishableVersion,
+  RemoteVersionError,
   installSpmCodegenTemplate,
   runCodegenAndInstallTemplate,
   SCAFFOLDER_MARKER,

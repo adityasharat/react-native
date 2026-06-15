@@ -63,6 +63,7 @@ const {
   makeLogger,
   resolveReactNativeRoot,
   remotePackageConfig,
+  RemoteVersionError,
 } = require('./spm-utils');
 const fs = require('fs');
 const path = require('path');
@@ -1803,7 +1804,16 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
 }
 
 if (require.main === module) {
-  main();
+  try {
+    main();
+  } catch (e) {
+    if (e instanceof RemoteVersionError) {
+      log(e.message);
+      process.exitCode = 2;
+    } else {
+      throw e;
+    }
+  }
 }
 
 module.exports = {

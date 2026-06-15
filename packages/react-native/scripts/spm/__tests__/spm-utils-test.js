@@ -11,11 +11,15 @@
 'use strict';
 
 const {
+  RemoteVersionError,
   buildPerAppHeaderTree,
   defaultCacheDir,
   displayPath,
+  isPublishableVersion,
   makeLogger,
   readPackageJson,
+  remotePackageConfig,
+  resolveInstalledRnVersion,
   resolveReactNativeRoot,
   runCodegenAndInstallTemplate,
   sharedCacheDir,
@@ -228,6 +232,208 @@ describe('resolveReactNativeRoot', () => {
         path.join(workspaceRoot, 'packages', 'app'),
       ),
     ).toBe(rnRoot);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isPublishableVersion
+// ---------------------------------------------------------------------------
+
+describe('isPublishableVersion', () => {
+  it.each([
+    ['0.86.3', true],
+    ['0.87.0-nightly-20260608-2ff3b81dc', true],
+    ['1.2.3', true],
+    ['1000.0.0', false],
+    ['0.0.0', false],
+    ['0.0.0-canary', false],
+    [null, false],
+    ['', false],
+  ])('isPublishableVersion(%j) => %j', (input, expected) => {
+    expect(isPublishableVersion(input)).toBe(expected);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveInstalledRnVersion
+// ---------------------------------------------------------------------------
+
+describe('resolveInstalledRnVersion', () => {
+  let tempDir;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spm-utils-test-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, {recursive: true, force: true});
+  });
+
+  function writeRn(dir /*: string */, version /*: string */) {
+    const rnDir = path.join(dir, 'node_modules', 'react-native');
+    fs.mkdirSync(rnDir, {recursive: true});
+    fs.writeFileSync(
+      path.join(rnDir, 'package.json'),
+      JSON.stringify({name: 'react-native', version}),
+    );
+  }
+
+  it('reads the version from appRoot/node_modules/react-native', () => {
+    writeRn(tempDir, '0.86.3');
+    expect(resolveInstalledRnVersion(tempDir)).toBe('0.86.3');
+  });
+
+  it('walks up to find a hoisted react-native', () => {
+    const appRoot = path.join(tempDir, 'packages', 'app', 'ios');
+    fs.mkdirSync(appRoot, {recursive: true});
+    writeRn(tempDir, '0.87.0');
+    expect(resolveInstalledRnVersion(appRoot)).toBe('0.87.0');
+  });
+
+  it('returns null when react-native is not installed', () => {
+    expect(resolveInstalledRnVersion(tempDir)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// remotePackageConfig
+// ---------------------------------------------------------------------------
+
+describe('remotePackageConfig', () => {
+  const REMOTE_CONFIG_REL = 'build/generated/autolinking/spm-remote.json';
+  let tempDir;
+  let savedEnv;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spm-utils-test-'));
+    savedEnv = {
+      url: process.env.RN_SPM_REMOTE_URL,
+      version: process.env.RN_SPM_REMOTE_VERSION,
+    };
+    delete process.env.RN_SPM_REMOTE_URL;
+    delete process.env.RN_SPM_REMOTE_VERSION;
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, {recursive: true, force: true});
+    if (savedEnv.url == null) {
+      delete process.env.RN_SPM_REMOTE_URL;
+    } else {
+      process.env.RN_SPM_REMOTE_URL = savedEnv.url;
+    }
+    if (savedEnv.version == null) {
+      delete process.env.RN_SPM_REMOTE_VERSION;
+    } else {
+      process.env.RN_SPM_REMOTE_VERSION = savedEnv.version;
+    }
+  });
+
+  function writeRn(version /*: string */) {
+    const rnDir = path.join(tempDir, 'node_modules', 'react-native');
+    fs.mkdirSync(rnDir, {recursive: true});
+    fs.writeFileSync(
+      path.join(rnDir, 'package.json'),
+      JSON.stringify({name: 'react-native', version}),
+    );
+  }
+
+  function writePersisted(obj /*: Object */) {
+    const cfgPath = path.join(tempDir, REMOTE_CONFIG_REL);
+    fs.mkdirSync(path.dirname(cfgPath), {recursive: true});
+    fs.writeFileSync(cfgPath, JSON.stringify(obj));
+  }
+
+  function readPersisted() /*: Object */ {
+    return JSON.parse(
+      fs.readFileSync(path.join(tempDir, REMOTE_CONFIG_REL), 'utf8'),
+    );
+  }
+
+  it('returns null in local mode (no URL anywhere)', () => {
+    expect(remotePackageConfig(tempDir)).toBeNull();
+  });
+
+  it('env override: activates remote mode and persists versionOverride', () => {
+    process.env.RN_SPM_REMOTE_URL = 'file:///tmp/react-native-apple';
+    process.env.RN_SPM_REMOTE_VERSION = '0.86.0';
+    writeRn('0.86.3'); // present but ignored — override wins
+
+    const result = remotePackageConfig(tempDir);
+    expect(result).toEqual({
+      url: 'file:///tmp/react-native-apple',
+      version: '0.86.0',
+      identity: 'react-native-apple',
+    });
+    expect(readPersisted()).toEqual({
+      url: 'file:///tmp/react-native-apple',
+      versionOverride: '0.86.0',
+    });
+  });
+
+  it('env URL only: derives version from npm and persists NO version', () => {
+    process.env.RN_SPM_REMOTE_URL = 'file:///tmp/react-native-apple';
+    writeRn('0.86.3');
+
+    const result = remotePackageConfig(tempDir);
+    expect(result).toEqual({
+      url: 'file:///tmp/react-native-apple',
+      version: '0.86.3',
+      identity: 'react-native-apple',
+    });
+    // Derived version is never frozen.
+    expect(readPersisted()).toEqual({url: 'file:///tmp/react-native-apple'});
+  });
+
+  it('throws RemoteVersionError for a non-publishable derived version', () => {
+    process.env.RN_SPM_REMOTE_URL = 'file:///tmp/react-native-apple';
+    writeRn('1000.0.0');
+    expect(() => remotePackageConfig(tempDir)).toThrow(RemoteVersionError);
+  });
+
+  it('throws RemoteVersionError when react-native is not installed', () => {
+    process.env.RN_SPM_REMOTE_URL = 'file:///tmp/react-native-apple';
+    expect(() => remotePackageConfig(tempDir)).toThrow(RemoteVersionError);
+  });
+
+  it('honors a persisted versionOverride with no env', () => {
+    writePersisted({
+      url: 'file:///tmp/react-native-apple',
+      versionOverride: '0.86.0',
+    });
+    writeRn('1000.0.0'); // dev placeholder — override still wins, no throw
+
+    expect(remotePackageConfig(tempDir)).toEqual({
+      url: 'file:///tmp/react-native-apple',
+      version: '0.86.0',
+      identity: 'react-native-apple',
+    });
+  });
+
+  it('reads a legacy persisted {url, version} as an override', () => {
+    writePersisted({
+      url: 'file:///tmp/react-native-apple',
+      version: '0.85.1',
+    });
+    writeRn('1000.0.0');
+
+    expect(remotePackageConfig(tempDir)).toEqual({
+      url: 'file:///tmp/react-native-apple',
+      version: '0.85.1',
+      identity: 'react-native-apple',
+    });
+  });
+
+  it('persisted URL only: derives from npm without an env (the sync lever)', () => {
+    writePersisted({url: 'file:///tmp/react-native-apple'});
+    writeRn('0.86.3');
+
+    expect(remotePackageConfig(tempDir)).toEqual({
+      url: 'file:///tmp/react-native-apple',
+      version: '0.86.3',
+      identity: 'react-native-apple',
+    });
+    // No env → no re-write of the persisted file.
+    expect(readPersisted()).toEqual({url: 'file:///tmp/react-native-apple'});
   });
 });
 

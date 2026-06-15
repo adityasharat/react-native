@@ -57,7 +57,12 @@ const {
   expandSpmDependencies,
 } = require('./expand-spm-dependencies');
 const {readPodspec} = require('./read-podspec');
-const {makeLogger, remotePackageConfig, toSwiftName} = require('./spm-utils');
+const {
+  RemoteVersionError,
+  makeLogger,
+  remotePackageConfig,
+  toSwiftName,
+} = require('./spm-utils');
 const fs = require('fs');
 const path = require('path');
 const yargs = require('yargs');
@@ -1474,7 +1479,16 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
 }
 
 if (require.main === module) {
-  main();
+  try {
+    main();
+  } catch (e) {
+    if (e instanceof RemoteVersionError) {
+      log(e.message);
+      process.exitCode = 2;
+    } else {
+      throw e;
+    }
+  }
 }
 
 module.exports = {

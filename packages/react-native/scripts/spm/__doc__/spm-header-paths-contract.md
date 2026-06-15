@@ -47,14 +47,33 @@ fixed-relative paths — no walk-up, no JSON, no `import Foundation`.
 
 ## Remote-package mode
 
-When `RN_SPM_REMOTE_URL` + `RN_SPM_REMOTE_VERSION` are set (persisted to
-`build/generated/autolinking/spm-remote.json`), the whole app graph flips to a
-single remote React Native package identity: `.package(path: build/xcframeworks)`
-becomes `.package(url:exact:)` everywhere (aggregator/synth/codegen template/
-pbxproj), and the local artifact download + compose is skipped. SPM's
+Remote mode is gated by a **URL alone** — `RN_SPM_REMOTE_URL` (or the persisted
+`url`). When set, the whole app graph flips to a single remote React Native
+package identity: `.package(path: build/xcframeworks)` becomes
+`.package(url:exact:)` everywhere (aggregator/synth/codegen template/pbxproj),
+and the local artifact download + compose is skipped. SPM's
 one-version-per-package rule then unifies app + every library on one resolved
 React Native. The package identity is derived from the URL tail (swift-tools 6
 dropped `.package(name:url:)`) — nothing hardcodes a repo name.
+
+**Version is derived from npm, not pinned by hand.** The SPM-pinned RN version
+is not a free parameter: the SPM graph must compile against the same React
+Native the JS/native code uses, so the app (graph root) pins EXACT to the
+*installed* RN version, read from `node_modules/react-native/package.json`.
+`RN_SPM_REMOTE_VERSION` and the persisted `versionOverride` are **overrides**,
+not the source of truth — they're only needed when the installed version isn't
+publishable (e.g. the monorepo `1000.0.0` dev placeholder, which has no remote
+tag). A *derived* version is never persisted, so an `npm install` that upgrades
+RN auto-re-pins the SPM graph on the next `spm` run; an *override* is persisted
+as `versionOverride` so it survives Xcode-phase re-syncs without the env.
+
+Persisted schema is `{url, versionOverride?}`. Legacy `{url, version}` is still
+read, with `version` honored as an override (back-compat). If remote mode is on
+but no usable version can be resolved — react-native isn't installed, or it's a
+non-publishable dev placeholder and no override is set — the tooling errors
+(exit 2, a hard Xcode build error) directing you to set `RN_SPM_REMOTE_VERSION`
+or install a released react-native, rather than silently pinning an unpublished
+tag.
 
 ## Hand-authored community library contract
 

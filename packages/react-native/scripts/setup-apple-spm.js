@@ -99,6 +99,7 @@ const {
 } = require('./spm/generate-spm-xcodeproj');
 const {scaffoldAll} = require('./spm/scaffold-package-swift');
 const {
+  RemoteVersionError,
   buildPerAppHeaderTree,
   defaultCacheDir,
   deriveAppName,
@@ -1610,6 +1611,25 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
   );
   const version = determineVersion(args, reactNativeRoot);
   log(`React Native version: ${version}`);
+
+  // Resolve remote SPM mode ONCE up front. remotePackageConfig throws
+  // RemoteVersionError when remote mode is active but no usable RN version can
+  // be derived (e.g. the monorepo '1000.0.0' placeholder with no override).
+  // The downstream scaffold/autolinker/package steps all call it internally;
+  // surfacing it here gives a single, predictable failure point before any of
+  // them run. Exit 2 (same as a missing manifest) so the Xcode build phase
+  // turns it into a hard build error while staying lenient on transient sync
+  // failures. No-op in local mode (returns null).
+  try {
+    remotePackageConfig(appRoot);
+  } catch (e) {
+    if (e instanceof RemoteVersionError) {
+      logError(e.message);
+      process.exitCode = 2;
+      return;
+    }
+    throw e;
+  }
   // The artifact cache directory is resolved later in ensureArtifacts so the
   // nightly hash can be folded in for dev / nightly labels. That branch logs
   // either "Downloading xcframework artifacts (slot: ...)" or
