@@ -802,25 +802,6 @@ async function maybePatchPodfile(
   );
 }
 
-function confirmScaffold(
-  depNames /*: Array<string> */,
-) /*: Promise<boolean> */ {
-  log('');
-  log(`Found ${depNames.length} community RN package(s) without SPM support:`);
-  for (const n of depNames) {
-    log(`  • ${n}`);
-  }
-  log('');
-  log(
-    'Scaffolding writes a Package.swift into node_modules/<dep>/ derived from\n' +
-      "the dep's podspec. node_modules gets wiped by `npm install` — to persist:\n" +
-      '  • add a `"postinstall": "npx react-native spm scaffold"` to package.json, OR\n' +
-      '  • `npx patch-package <dep>` after scaffolding.',
-  );
-  log('');
-  return promptYesNo('Generate Package.swift for the deps above?', true);
-}
-
 function confirmDestructive(
   targets /*: Array<CleanTarget> */,
 ) /*: Promise<boolean> */ {
@@ -978,15 +959,18 @@ function runCodegenStep(
  * Runs as part of `init` / `update` / `scaffold` actions. Each invocation
  * is a no-op for deps already in a clean state.
  */
+// Scaffolding is an EXPLICIT, manual step (`npx react-native spm scaffold`) and
+// is NEVER run automatically by init/update/sync. A missing Package.swift is a
+// real gap that must surface as a hard build error (see reportMissingManifests)
+// so the user fixes it deliberately: scaffold, then persist with patch-package
+// (node_modules is not committed), and ideally get it fixed upstream. There is
+// intentionally no prompt and no auto-restore — auto-scaffolding would hide the
+// error, and a wiped scaffold SHOULD re-surface it.
 async function runScaffold(
   args /*: SetupArgs */,
   appRoot /*: string */,
   projectRoot /*: string */,
   reactNativeRoot /*: string */,
-  // Caller's resolved action — same union as resolveAction's return type.
-  // Typed precisely so Flow accepts the `action === 'scaffold'` checks
-  // below (strict mode rejects `string === <singleton>` as invalid-compare).
-  action /*: 'init' | 'update' | 'sync' | 'clean' | 'codegen' | 'download' | 'scaffold' */,
 ) /*: Promise<void> */ {
   // Resolve the cache slot identifier so the scaffolded files carry it as
   // a comment — that's how SPM's manifest hash bumps on slot transitions.
@@ -1000,57 +984,6 @@ async function runScaffold(
     // doesn't get the slot-bump comment.
   }
 
-  // Pass 1: dry-run to discover which deps would be scaffolded for the
-  // FIRST time (no existing Package.swift). Those are the only ones we
-  // prompt the user about — regens of files we already own happen silently.
-  let dryResults;
-  try {
-    dryResults = scaffoldAll({
-      appRoot,
-      projectRoot,
-      reactNativeRoot,
-      cacheSlotLabel,
-      force: action === 'scaffold',
-      dryRun: true,
-    });
-  } catch (e) {
-    logError(
-      `scaffold dry-run failed: ${e.message}. Continuing — community deps may not autolink.`,
-    );
-    return;
-  }
-
-  const newScaffoldDeps /*: Array<string> */ = [];
-  for (const r of dryResults) {
-    if (r.status === 'written' && r.previouslyExisted === false) {
-      newScaffoldDeps.push(r.depName);
-    }
-  }
-
-  // Decide which (if any) first-time deps the user wants scaffolded.
-  // - `scaffold` action: user explicitly asked → no prompt
-  // - `--yes`: bypass prompt
-  // - non-TTY (CI): auto-accept
-  // - otherwise: prompt with a list; default Yes
-  let skipDeps /*: Array<string> */ = [];
-  if (
-    newScaffoldDeps.length > 0 &&
-    action !== 'scaffold' &&
-    !args.cleanYes &&
-    process.stdin.isTTY === true
-  ) {
-    const proceed = await confirmScaffold(newScaffoldDeps);
-    if (!proceed) {
-      // Decline ALL first-time scaffolds; existing scaffolder-marker files
-      // still get regenerated (slot changes etc.).
-      skipDeps = newScaffoldDeps;
-      log(
-        'Skipping first-time scaffolds for this run. ' +
-          'Re-run `npx react-native spm scaffold` (or pass --yes) to accept.',
-      );
-    }
-  }
-
   let results;
   try {
     results = scaffoldAll({
@@ -1058,16 +991,13 @@ async function runScaffold(
       projectRoot,
       reactNativeRoot,
       cacheSlotLabel,
-      // `scaffold` action forces a re-render even when slot is unchanged,
-      // so a user re-running it after editing a podspec gets the new
-      // content. `update`/`init` are non-forcing (idempotent).
-      force: action === 'scaffold',
-      skipDeps,
+      // Always force a re-render so re-running after editing a podspec picks
+      // up the new content.
+      force: true,
     });
   } catch (e) {
-    logError(
-      `scaffold failed: ${e.message}. Continuing — community deps may not autolink.`,
-    );
+    logError(`scaffold failed: ${e.message}.`);
+    process.exitCode = 1;
     return;
   }
 
@@ -1084,9 +1014,11 @@ async function runScaffold(
     }
     log('');
     log(
-      'TIP: node_modules is wiped by `npm install`. To persist:\n' +
-        '  • add `"postinstall": "npx react-native spm scaffold"` to package.json (preferred), OR\n' +
-        '  • `npx patch-package <dep>` after scaffolding (cross-machine portability with caveats).',
+      'node_modules is NOT committed and is wiped by `npm install`. To keep\n' +
+        'these manifests, create and commit a patch with a tool like patch-package:\n' +
+        '  • `npx patch-package <dep>` for each scaffolded dep, then commit the patch.\n' +
+        'Also consider asking the maintainer to ship a Package.swift upstream.\n' +
+        'Without a committed patch the build will hard-error again after a fresh install.',
     );
     log('');
   }
@@ -1681,12 +1613,14 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
   }
 
   // Scaffold Package.swift for community RN packages that don't ship SPM
-  // support. Runs BEFORE the autolinker so the autolinker sees the
-  // scaffolded files as self-managed (via isSelfManagedPackage's
-  // AUTOGEN_MARKER check) and references them directly from the aggregator.
-  // No-op for deps that already have an upstream Package.swift, opted out,
-  // or had no .podspec.
-  await runScaffold(args, appRoot, projectRoot, reactNativeRoot, action);
+  // support — ONLY for the explicit `scaffold` action. init/update never
+  // auto-scaffold: a missing manifest must surface as a hard error (the
+  // autolinker below throws MissingManifestError → exit 2) so the gap is
+  // visible and fixed deliberately (scaffold + patch-package, or upstream).
+  // Auto-scaffolding would silently hide that real error.
+  if (action === 'scaffold') {
+    await runScaffold(args, appRoot, projectRoot, reactNativeRoot);
+  }
 
   runCodegenStep(projectRoot, appRoot, reactNativeRoot, args.skipCodegen);
   log('Generating build/generated/autolinking/Package.swift...');

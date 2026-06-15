@@ -57,6 +57,36 @@ describe('generateAutolinkedPackageSwift (aggregator)', () => {
     expect(result).toContain('.product(name: "B", package: "B")');
   });
 
+  it('emits an eval-time missing-manifest guard naming each lib by npm name', () => {
+    const result = generateAutolinkedPackageSwift({
+      npmDeps: [
+        {
+          swiftName: 'ReactNativeSafeAreaContext',
+          packagePath: 'libs/ReactNativeSafeAreaContext',
+          npmName: 'react-native-safe-area-context',
+        },
+      ],
+    });
+    // The guard runs at resolution (manifest eval) — before the Xcode sync
+    // build phase — so a wiped library manifest surfaces an actionable message
+    // instead of SwiftPM's opaque "manifest cannot be accessed".
+    expect(result).toContain('let __rnAutolinkedLibs');
+    expect(result).toContain(
+      '(path: "libs/ReactNativeSafeAreaContext", npm: "react-native-safe-area-context")',
+    );
+    expect(result).toContain('FileManager.default.fileExists');
+    expect(result).toContain('npx react-native spm scaffold');
+    expect(result).toContain('npx patch-package');
+    expect(result).toContain('fatalError(');
+    // The guard reads its own location to resolve lib paths.
+    expect(result).toContain('#filePath');
+  });
+
+  it('omits the guard entirely when there are no npm deps', () => {
+    const result = generateAutolinkedPackageSwift({});
+    expect(result).not.toContain('__rnAutolinkedLibs');
+  });
+
   it('emits inline .target() blocks for each inlineTarget alongside AutolinkedAggregate', () => {
     const result = generateAutolinkedPackageSwift({
       inlineTargets: [
@@ -823,10 +853,14 @@ describe('MissingManifestError + reportMissingManifests', () => {
     expect(err).toBeInstanceOf(MissingManifestError);
     expect(errSpy).toHaveBeenCalledTimes(2);
     const lines = errSpy.mock.calls.map(c => c[0]);
-    // Xcode only renders lines beginning with `error: `.
+    // Xcode only renders the `error: ` headline; each dep is one such message.
     expect(lines.every(l => l.startsWith('error: '))).toBe(true);
     expect(lines[0]).toContain('react-native-foo');
     expect(lines[0]).toContain('npx react-native spm scaffold');
+    // The pressure mechanics: persist via patch-package, and the error returns
+    // on a fresh node_modules if you don't (no auto-scaffold/auto-restore).
+    expect(lines[0]).toContain('patch-package');
+    expect(lines[0]).toContain('node_modules is reset');
   });
 
   it('tells the user a podspec-less dep cannot be auto-scaffolded', () => {

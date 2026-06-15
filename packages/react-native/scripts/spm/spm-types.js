@@ -241,6 +241,10 @@ export type NpmDepRef = {
   // Path passed to .package(path:). Relative to autolinked/ (the aggregator's
   // dir). For in-place synth this is the dep's real source dir.
   packagePath?: string,
+  // The npm package name (e.g. react-native-safe-area-context). Used by the
+  // aggregator's eval-time missing-manifest guard to name the library a
+  // developer installed (not its Swift target name).
+  npmName?: string,
 };
 
 export type AggregatorInput = {
