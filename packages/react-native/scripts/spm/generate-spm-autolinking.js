@@ -284,6 +284,68 @@ function findSelfManagedPackageDir(absSource /*: string */) /*: ?string */ {
 }
 
 /**
+ * Does this dep ship a CocoaPods podspec? (Checked at the dep root and under
+ * ios/.) A missing manifest is auto-scaffoldable only when a podspec exists —
+ * the scaffolder translates the podspec into a Package.swift.
+ */
+function hasPodspec(absSource /*: string */) /*: boolean */ {
+  for (const sub of ['', 'ios']) {
+    const dir = sub === '' ? absSource : path.join(absSource, sub);
+    try {
+      if (fs.readdirSync(dir).some(e => e.endsWith('.podspec'))) {
+        return true;
+      }
+    } catch {
+      // dir does not exist; try the next candidate
+    }
+  }
+  return false;
+}
+
+/**
+ * Error thrown when one or more autolinked community npm deps have no Swift
+ * Package Manager manifest (neither a shipped Package.swift nor a scaffolded
+ * one). The autolinker no longer silently synthesizes a manifest for these —
+ * that hid the gap and duplicated the scaffolder. Carries the dep list so the
+ * CLI can surface a precise, actionable message and set a distinct exit code
+ * (the Xcode build phase keys off it to fail the build).
+ */
+class MissingManifestError extends Error {
+  /*:: missingManifests: Array<{name: string, npmName: string, hasPodspec: boolean}>; */
+  constructor(
+    deps /*: Array<{name: string, npmName: string, hasPodspec: boolean}> */,
+  ) {
+    super(
+      `${deps.length} autolinked native module(s) have no Package.swift. ` +
+        'Run `npx react-native spm scaffold` to generate them.',
+    );
+    this.name = 'MissingManifestError';
+    this.missingManifests = deps;
+  }
+}
+
+/**
+ * Prints one `error:`-prefixed line per missing-manifest dep so Xcode surfaces
+ * each as a build error (Xcode parses lines beginning with `error: `), then
+ * returns the MissingManifestError to throw. Kept together so the message and
+ * the thrown error never drift.
+ */
+function reportMissingManifests(
+  deps /*: Array<{name: string, npmName: string, hasPodspec: boolean}> */,
+) /*: MissingManifestError */ {
+  for (const d of deps) {
+    const fix = d.hasPodspec
+      ? `Run \`npx react-native spm scaffold\` from your terminal to generate one (persist it with patch-package, or contribute a Package.swift upstream to ${d.npmName}).`
+      : `${d.npmName} ships no podspec, so it cannot be auto-scaffolded — it needs Swift Package Manager support added manually.`;
+    // eslint-disable-next-line no-console
+    console.error(
+      `error: Package.swift is missing for library "${d.npmName}". ${fix}`,
+    );
+  }
+  return new MissingManifestError(deps);
+}
+
+/**
  * Mirrors every header file under `srcDir` as a relative symlink at the same
  * relative location under `destDir`. Used for the centralized cross-package
  * headers tree at `<outputDir>/headers/<SwiftName>/` so consumers can resolve
@@ -973,7 +1035,7 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
         swiftNameByNpm,
       );
       if (target != null) {
-        entries.push({target, origin: 'npm'});
+        entries.push({target, origin: 'npm', npmName: dep.name});
         log(`Found npm native module: ${target.name} → ${target.path}`);
       }
     }
@@ -1065,6 +1127,14 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
   const wrapperDirs /*: Map<string, string> */ = new Map();
   const selfManagedDirs /*: Map<string, string> */ = new Map();
   const aggregatorPackageDeps /*: Array<NpmDepRef> */ = [];
+  // Community npm deps that autolink but ship/scaffold no Package.swift. We no
+  // longer silently synthesize one for them (that duplicated the scaffolder and
+  // hid the gap from the developer and the library author) — collect them and
+  // fail with an actionable message after the classification pass. spmModules
+  // (app-local, podspec-less, explicitly declared in react-native.config.js)
+  // keep their synth wrappers: there is nothing to scaffold for them.
+  const missingManifests /*: Array<{name: string, npmName: string, hasPodspec: boolean}> */ =
+    [];
 
   for (const entry of entries) {
     const {target} = entry;
@@ -1096,10 +1166,35 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
       );
       continue;
     }
+    if (entry.origin === 'npm') {
+      // No shipped or scaffolded manifest — this is the gap we now surface.
+      missingManifests.push({
+        name: target.name,
+        npmName: entry.npmName ?? target.name,
+        hasPodspec: hasPodspec(absSource),
+      });
+      // Drop any stale wrapper from a previous synth-mode run so SPM doesn't
+      // resolve against it.
+      const staleWrapper = path.join(packagesDir, target.name);
+      if (fs.existsSync(staleWrapper)) {
+        fs.rmSync(staleWrapper, {recursive: true, force: true});
+      }
+      continue;
+    }
+    // spmModule: synth wrapper is the legitimate mechanism (no podspec exists
+    // to scaffold from, and the app developer declared it explicitly).
     const wrapperDir = path.join(packagesDir, target.name);
     wrapperDirs.set(target.name, wrapperDir);
     fs.mkdirSync(wrapperDir, {recursive: true});
     ensureSymlink(path.join(wrapperDir, WRAPPER_ROOT_NAME), absSource);
+  }
+
+  // Fail before writing any wrappers/aggregator: a missing community-lib
+  // manifest is a hard error the developer must resolve by scaffolding (or the
+  // library shipping its own). reportMissingManifests prints one `error:` line
+  // per dep so Xcode renders them as build errors.
+  if (missingManifests.length > 0) {
+    throw reportMissingManifests(missingManifests);
   }
 
   // Sibling refs: each synth Package.swift declares its sibling deps via the
@@ -1390,5 +1485,8 @@ module.exports = {
   collectSpmSources,
   expandSpmSourceGlobs,
   findSelfManagedPackageDir,
+  hasPodspec,
+  MissingManifestError,
+  reportMissingManifests,
   AUTOGEN_MARKER,
 };

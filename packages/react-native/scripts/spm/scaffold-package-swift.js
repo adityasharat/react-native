@@ -35,7 +35,11 @@ import type {
  *   - scaffoldAll(opts): orchestrator over autolinking.json
  */
 
-const {defaultReadConfig} = require('./expand-spm-dependencies');
+const {
+  defaultReadConfig,
+  defaultResolveDep,
+  expandSpmDependencies,
+} = require('./expand-spm-dependencies');
 const {expandSpmSourceGlobs} = require('./generate-spm-autolinking');
 const {readPodspec} = require('./read-podspec');
 const {
@@ -715,26 +719,15 @@ function scaffoldAll(
     return [];
   }
 
-  const ctx /*: ScaffoldContext */ = {
-    appRoot,
-    projectRoot,
-    reactNativeRoot,
-    force: opts.force === true,
-    dryRun: opts.dryRun === true,
-    cacheSlotLabel: opts.cacheSlotLabel ?? null,
-  };
-  const skipSet /*: Set<string> */ = new Set(opts.skipDeps ?? []);
-
+  // Narrow the direct autolinking.json entries with an iOS platform, then
+  // expand transitive `spm.dependencies` so the scaffolder covers EXACTLY the
+  // set the autolinker considers. Without this, a transitive native dep that
+  // ships no Package.swift would be flagged by the autolinker but never
+  // scaffolded here — leaving `react-native spm scaffold` unable to clear the
+  // autolinker's missing-manifest error.
   const results /*: Array<ScaffoldResult> */ = [];
+  const directDeps /*: Array<AutolinkedDep> */ = [];
   for (const name of Object.keys(deps)) {
-    if (skipSet.has(name)) {
-      results.push({
-        depName: name,
-        status: 'skipped-opt-out',
-        reason: 'User declined scaffolding for this dep.',
-      });
-      continue;
-    }
     const raw = deps[name];
     if (raw == null) continue;
     const root = raw.root;
@@ -747,17 +740,47 @@ function scaffoldAll(
       });
       continue;
     }
-    // $FlowFixMe[incompatible-type] `ios` shape comes from autolinking.json — runtime-validated above
+    // $FlowFixMe[incompatible-type] `ios` shape is runtime-validated above
     const iosPlatform /*: AutolinkingIosPlatform */ = ios;
-    const dep /*: AutolinkedDep */ = {
-      name,
-      root,
-      platforms: {ios: iosPlatform},
-    };
+    directDeps.push({name, root, platforms: {ios: iosPlatform}});
+  }
+
+  let allDeps /*: Array<AutolinkedDep> */;
+  try {
+    allDeps = expandSpmDependencies(directDeps, {
+      readConfig: defaultReadConfig,
+      resolveDep: defaultResolveDep,
+    });
+  } catch (e) {
+    // A transitive-resolution failure shouldn't abort the whole scaffold pass;
+    // fall back to the direct deps so at least those get manifests.
+    log(`Transitive spm.dependencies expansion failed: ${e.message}`);
+    allDeps = directDeps;
+  }
+
+  const ctx /*: ScaffoldContext */ = {
+    appRoot,
+    projectRoot,
+    reactNativeRoot,
+    force: opts.force === true,
+    dryRun: opts.dryRun === true,
+    cacheSlotLabel: opts.cacheSlotLabel ?? null,
+  };
+  const skipSet /*: Set<string> */ = new Set(opts.skipDeps ?? []);
+
+  for (const dep of allDeps) {
+    if (skipSet.has(dep.name)) {
+      results.push({
+        depName: dep.name,
+        status: 'skipped-opt-out',
+        reason: 'User declined scaffolding for this dep.',
+      });
+      continue;
+    }
     try {
       results.push(scaffoldPackageSwiftForDep(dep, ctx));
     } catch (e) {
-      results.push({depName: name, status: 'error', reason: e.message});
+      results.push({depName: dep.name, status: 'error', reason: e.message});
     }
   }
   return results;

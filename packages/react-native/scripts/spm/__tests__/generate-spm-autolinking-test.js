@@ -12,12 +12,15 @@
 
 const {
   AUTOGEN_MARKER,
+  MissingManifestError,
   collectSpmSources,
   expandSpmSourceGlobs,
   findSelfManagedPackageDir,
   generateAutolinkedPackageSwift,
   generateSynthPackageSwift,
+  hasPodspec,
   linkHeaderTree,
+  reportMissingManifests,
 } = require('../generate-spm-autolinking');
 const fs = require('fs');
 const os = require('os');
@@ -755,5 +758,84 @@ describe('findSelfManagedPackageDir', () => {
       '// Hand-authored nested manifest.\n',
     );
     expect(findSelfManagedPackageDir(depRoot)).toBe(path.join(depRoot, 'ios'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hasPodspec — does the dep ship a podspec (auto-scaffoldable)?
+// ---------------------------------------------------------------------------
+describe('hasPodspec', () => {
+  let depRoot;
+
+  beforeEach(() => {
+    depRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'spm-podspec-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(depRoot, {recursive: true, force: true});
+  });
+
+  it('returns false when no .podspec exists at the root or under ios/', () => {
+    expect(hasPodspec(depRoot)).toBe(false);
+  });
+
+  it('returns true for a .podspec at the dep root', () => {
+    fs.writeFileSync(path.join(depRoot, 'Foo.podspec'), '# podspec');
+    expect(hasPodspec(depRoot)).toBe(true);
+  });
+
+  it('returns true for a .podspec under ios/', () => {
+    fs.mkdirSync(path.join(depRoot, 'ios'));
+    fs.writeFileSync(path.join(depRoot, 'ios', 'Foo.podspec'), '# podspec');
+    expect(hasPodspec(depRoot)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Missing-manifest error — the gate that replaced the silent synth wrapper
+// for community npm deps. The `error:` line prefix is the load-bearing
+// contract: Xcode parses it to render a build error.
+// ---------------------------------------------------------------------------
+describe('MissingManifestError + reportMissingManifests', () => {
+  let errSpy;
+
+  beforeEach(() => {
+    errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errSpy.mockRestore();
+  });
+
+  it('carries the dep list and a scaffold instruction on the error', () => {
+    const deps = [{name: 'Foo', npmName: 'react-native-foo', hasPodspec: true}];
+    const err = new MissingManifestError(deps);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.missingManifests).toEqual(deps);
+    expect(err.message).toContain('react-native spm scaffold');
+  });
+
+  it('emits one `error:`-prefixed line per dep naming the npm package + fix', () => {
+    const err = reportMissingManifests([
+      {name: 'Foo', npmName: 'react-native-foo', hasPodspec: true},
+      {name: 'Bar', npmName: 'react-native-bar', hasPodspec: true},
+    ]);
+    expect(err).toBeInstanceOf(MissingManifestError);
+    expect(errSpy).toHaveBeenCalledTimes(2);
+    const lines = errSpy.mock.calls.map(c => c[0]);
+    // Xcode only renders lines beginning with `error: `.
+    expect(lines.every(l => l.startsWith('error: '))).toBe(true);
+    expect(lines[0]).toContain('react-native-foo');
+    expect(lines[0]).toContain('npx react-native spm scaffold');
+  });
+
+  it('tells the user a podspec-less dep cannot be auto-scaffolded', () => {
+    reportMissingManifests([
+      {name: 'Baz', npmName: 'react-native-baz', hasPodspec: false},
+    ]);
+    const line = errSpy.mock.calls[0][0];
+    expect(line.startsWith('error: ')).toBe(true);
+    expect(line).toContain('no podspec');
+    expect(line).toContain('react-native-baz');
   });
 });

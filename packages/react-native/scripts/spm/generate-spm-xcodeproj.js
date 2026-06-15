@@ -888,10 +888,18 @@ fi
 
 cd "$SRCROOT"
 if command -v npx >/dev/null 2>&1; then
-  npx react-native spm sync || {
+  npx react-native spm sync
+  RC=$?
+  if [ "$RC" -eq 2 ]; then
+    # Exit 2 = an autolinked community dependency has no Package.swift. The
+    # autolinker already printed an \`error:\` line per dep (so Xcode shows them
+    # and the fix). Fail the build — the developer must run
+    # \`npx react-native spm scaffold\` from a terminal to generate the manifest.
+    exit 1
+  elif [ "$RC" -ne 0 ]; then
     echo "warning: SPM sync failed — build may use stale codegen/autolinking"
     exit 0
-  }
+  fi
 else
   echo "warning: npx not found — skipping SPM sync"
   exit 0

@@ -82,7 +82,10 @@ const {
   resolveCacheSlotVersion,
   validateArtifactsCache,
 } = require('./spm/download-spm-artifacts');
-const {main: generateAutolinking} = require('./spm/generate-spm-autolinking');
+const {
+  MissingManifestError,
+  main: generateAutolinking,
+} = require('./spm/generate-spm-autolinking');
 const {
   generateAutolinkingConfig,
 } = require('./spm/generate-spm-autolinking-config');
@@ -1439,8 +1442,16 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
         reactNativeRoot,
       ]);
     } catch (e) {
-      logError(`SPM sync failed: ${e.message}`);
-      process.exitCode = 1;
+      if (e instanceof MissingManifestError) {
+        // The per-dep `error:` lines were already printed by the autolinker.
+        // Exit 2 (distinct from generic failure) so the Xcode build phase can
+        // turn this into a hard build error while staying lenient on transient
+        // sync failures.
+        process.exitCode = 2;
+      } else {
+        logError(`SPM sync failed: ${e.message}`);
+        process.exitCode = 1;
+      }
     }
     return;
   }
@@ -1479,8 +1490,15 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
       reactNativeRoot,
     ]);
   } catch (e) {
-    logError(`generate-spm-autolinking.js failed: ${e.message}`);
-    process.exitCode = 1;
+    if (e instanceof MissingManifestError) {
+      // Per-dep `error:` lines already printed by the autolinker. This happens
+      // on init/update when the user declined the scaffold prompt — surface it
+      // as a hard failure (exit 2) directing them to scaffold.
+      process.exitCode = 2;
+    } else {
+      logError(`generate-spm-autolinking.js failed: ${e.message}`);
+      process.exitCode = 1;
+    }
     return;
   }
 

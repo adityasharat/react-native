@@ -136,6 +136,10 @@ export type SpmTarget = {
 export type TargetEntry = {
   target: SpmTarget,
   origin: 'npm' | 'spmModule',
+  // The dep's npm package name (origin 'npm' only). Used in the
+  // missing-manifest error so the message names the package the developer
+  // installed, not its derived Swift target name.
+  npmName?: string,
   // Filled in for npm-origin entries during the mirror step; consumed by the
   // synth-package emission step further down.
   mirrorReady?: ?{
