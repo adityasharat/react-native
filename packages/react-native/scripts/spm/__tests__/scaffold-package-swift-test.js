@@ -123,6 +123,54 @@ describe('translatePodspecToSpmTarget', () => {
     }
   });
 
+  it('wires a pod-style dependency (RNWorklets) to its npm sibling via the podToNpm index', () => {
+    const model = podspec({dependencies: ['RNWorklets', 'React-jsi']});
+    const spec = translatePodspecToSpmTarget(
+      model,
+      autolinkedDep({name: 'react-native-reanimated'}),
+      new Map([
+        ['RNWorklets', 'react-native-worklets'],
+        ['RNReanimated', 'react-native-reanimated'],
+      ]),
+    );
+    // RNWorklets → sibling; React-jsi → collapses into ReactNative core.
+    expect(spec.siblingNames).toContain('react-native-worklets');
+    expect(spec.coreReactNative).toBe(true);
+  });
+
+  it('does not self-wire when a pod dependency maps back to the dep itself', () => {
+    const model = podspec({dependencies: ['RNReanimated']});
+    const spec = translatePodspecToSpmTarget(
+      model,
+      autolinkedDep({name: 'react-native-reanimated'}),
+      new Map([['RNReanimated', 'react-native-reanimated']]),
+    );
+    expect(spec.siblingNames).not.toContain('react-native-reanimated');
+  });
+
+  it('derives publicHeadersPath from header_mappings_dir, preferring the cross-platform (Common) namespace root', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wk-scaffold-'));
+    try {
+      fs.mkdirSync(path.join(root, 'Common', 'cpp', 'worklets'), {
+        recursive: true,
+      });
+      fs.mkdirSync(path.join(root, 'apple', 'worklets'), {recursive: true});
+      const model = podspec({
+        headerMappingsDirs: ['Common/cpp/worklets', 'apple/worklets'],
+        publicHeaderFiles: ['Common/cpp/worklets/**/*.h'],
+      });
+      const spec = translatePodspecToSpmTarget(
+        model,
+        autolinkedDep({name: 'react-native-worklets', root}),
+      );
+      // Common/cpp (parent of Common/cpp/worklets) is what dependents need to
+      // resolve <worklets/...>; the apple/ root is not preferred.
+      expect(spec.publicHeadersPath).toBe('Common/cpp');
+    } finally {
+      fs.rmSync(root, {recursive: true, force: true});
+    }
+  });
+
   it('does not add "." for a single-segment header_mappings_dir', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rea-scaffold-'));
     try {
@@ -390,12 +438,15 @@ describe('emitScaffoldedPackageSwift', () => {
     expect(out).not.toContain('build/xcframeworks');
   });
 
-  it('emits sibling .package(path: "../<name>") + .product entries for sibling RN deps', () => {
+  it('emits sibling .package(path: "../<SwiftName>") + .product entries for sibling RN deps', () => {
     const out = emitScaffoldedPackageSwift(
       baseSpec({siblingNames: ['react-native-worklets']}),
     );
+    // Path uses the libs/<SwiftName> symlink name (where the autolinker places
+    // the sibling), NOT the npm name — `../react-native-worklets` would be
+    // `libs/react-native-worklets`, which does not exist.
     expect(out).toContain(
-      '.package(name: "ReactNativeWorklets", path: "../react-native-worklets")',
+      '.package(name: "ReactNativeWorklets", path: "../ReactNativeWorklets")',
     );
     expect(out).toContain(
       '.product(name: "ReactNativeWorklets", package: "ReactNativeWorklets")',

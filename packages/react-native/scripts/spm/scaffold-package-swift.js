@@ -83,7 +83,14 @@ const {log} = makeLogger('scaffold-package-swift');
 // v8: relative app paths (codegen / xcframeworks) are now computed from the
 // autolinker's libs/<SwiftName> symlink location instead of the real dep.root,
 // fixing a doubled-path resolution failure on fresh SwiftPM resolves.
-const SCAFFOLDER_VERSION = 9;
+// v9: header search paths derived from each subspec's header_mappings_dir
+// (dirname) so namespaced includes (`<reanimated/...>`) resolve. v10:
+// publicHeadersPath derived from the header_mappings_dir namespace root so a
+// package exposes `<namespace/...>` to dependents; pod-style sibling deps
+// (reanimated's `s.dependency "RNWorklets"`) wired to their npm package. v11:
+// sibling .package path uses the libs/<SwiftName> symlink name, not the npm
+// name (fixes "package ... doesn't exist" on resolve).
+const SCAFFOLDER_VERSION = 11;
 const SCAFFOLDER_VERSION_LINE_RE = /^\/\/ AUTO-SCAFFOLDED-VERSION: (\d+)$/m;
 
 const AUTOGEN_MARKER =
@@ -130,6 +137,11 @@ function isReactCoreDep(name /*: string */) /*: boolean */ {
 function translatePodspecToSpmTarget(
   model /*: PodspecModel */,
   dep /*: AutolinkedDep */,
+  // Maps a podspec name (e.g. "RNWorklets") to the npm package name of an
+  // autolinked sibling (e.g. "react-native-worklets"). Lets us wire a
+  // `s.dependency "RNWorklets"` — a pod-style name the `react-native-*`
+  // heuristic can't recognize — to the right sibling package. Empty by default.
+  podToNpm /*: Map<string, string> */ = new Map(),
 ) /*: SpmScaffoldSpec */ {
   const warnings = [...model.warnings];
 
@@ -210,6 +222,7 @@ function translatePodspecToSpmTarget(
     if (depName.includes('/') && depName.startsWith(`${selfPodspecName}/`)) {
       continue;
     }
+    const podSibling = podToNpm.get(depName.split('/')[0]);
     if (isReactCoreDep(depName)) {
       coreReactNative = true;
     } else if (depName.startsWith('react-native-')) {
@@ -217,6 +230,14 @@ function translatePodspecToSpmTarget(
       const baseName = depName.split('/')[0];
       if (!siblingNames.includes(baseName)) {
         siblingNames.push(baseName);
+      }
+    } else if (podSibling != null && podSibling !== dep.name) {
+      // A pod-style dependency name (e.g. reanimated's `s.dependency
+      // "RNWorklets"`) that resolves to an autolinked sibling's npm package
+      // (react-native-worklets). Wire it as a sibling .package/.product so
+      // the dep's cross-package includes (`<worklets/...>`) resolve.
+      if (!siblingNames.includes(podSibling)) {
+        siblingNames.push(podSibling);
       }
     } else {
       // Could be a non-RN dep ("MMKV", "AFNetworking"). The scaffolder
@@ -264,15 +285,33 @@ function translatePodspecToSpmTarget(
   // instead. publicHeadersPath just has to point at a real dir containing
   // some .h files so SPM accepts the target definition.
   let publicHeadersPath /*: ?string */ = null;
-  for (const glob of [...model.publicHeaderFiles, ...model.sourceFiles]) {
-    const prefix = glob.split('/')[0];
-    if (
-      prefix.length > 0 &&
-      !prefix.includes('*') &&
-      fs.existsSync(path.join(dep.root, prefix))
-    ) {
-      publicHeadersPath = prefix;
-      break;
+  // Prefer the namespace root (parent of a header_mappings_dir). SPM propagates
+  // a target's publicHeadersPath to DEPENDENT packages as a search path, so
+  // setting it to e.g. `Common/cpp` (parent of `Common/cpp/worklets`) is what
+  // lets a sibling package resolve `<worklets/...>`. Prefer a cross-platform
+  // (Common) dir — that holds the C++ API siblings consume — over a
+  // platform-specific (apple/) one.
+  const mappingsParents = model.headerMappingsDirs
+    .map(d => path.posix.dirname(d.replace(/^\.\//, '')))
+    .filter(
+      p => p.length > 0 && p !== '.' && fs.existsSync(path.join(dep.root, p)),
+    );
+  if (mappingsParents.length > 0) {
+    publicHeadersPath =
+      mappingsParents.find(p => /(?:^|\/)common(?:\/|$)/i.test(p)) ??
+      mappingsParents[0];
+  }
+  if (publicHeadersPath == null) {
+    for (const glob of [...model.publicHeaderFiles, ...model.sourceFiles]) {
+      const prefix = glob.split('/')[0];
+      if (
+        prefix.length > 0 &&
+        !prefix.includes('*') &&
+        fs.existsSync(path.join(dep.root, prefix))
+      ) {
+        publicHeadersPath = prefix;
+        break;
+      }
     }
   }
   if (publicHeadersPath == null) {
@@ -415,12 +454,13 @@ function emitScaffoldedPackageSwift(
   }
   for (const siblingName of spec.siblingNames) {
     const swiftSibling = toSwiftName(siblingName);
-    // Sibling deps share this package's node_modules parent dir (the same
-    // assumption the old runtime siblingPath helper made), so a literal
-    // relative path covers them — including scoped names, whose `/`
-    // resolves as a path segment.
+    // The autolinker references each self-managed (scaffolded) dep through a
+    // `libs/<SwiftName>` symlink, and SPM resolves a manifest's relative
+    // package paths against that symlink location — so a sibling lives at
+    // `../<SwiftName>` (NOT `../<npm-name>`, which would be `libs/<npm-name>`
+    // and not exist).
     packageDeps.push(
-      `.package(name: "${swiftSibling}", path: "../${siblingName}")`,
+      `.package(name: "${swiftSibling}", path: "../${swiftSibling}")`,
     );
     targetDeps.push(
       `.product(name: "${swiftSibling}", package: "${swiftSibling}")`,
@@ -508,6 +548,9 @@ type ScaffoldContext = {
   // Slot label (e.g. "0.87.0-nightly-20260513-6e262624f/debug") embedded as
   // a comment so SPM's manifest hash bumps on slot changes.
   cacheSlotLabel: ?string,
+  // podspec-name → npm-name index over all autolinked deps, so pod-style
+  // `s.dependency` names (e.g. "RNWorklets") wire to the right sibling.
+  podToNpm?: Map<string, string>,
 };
 */
 
@@ -658,7 +701,11 @@ function scaffoldPackageSwiftForDep(
     };
   }
 
-  const spec = translatePodspecToSpmTarget(model, dep);
+  const spec = translatePodspecToSpmTarget(
+    model,
+    dep,
+    ctx.podToNpm ?? new Map(),
+  );
   // Relative paths into the app, embedded in the scaffolded Package.swift.
   //
   // The manifest is written to <dep.root>/Package.swift, but the autolinker
@@ -799,6 +846,19 @@ function scaffoldAll(
     allDeps = directDeps;
   }
 
+  // Index every autolinked dep's podspec name → its npm name, so a dep that
+  // depends on a sibling by its pod name (reanimated's `s.dependency
+  // "RNWorklets"`) can be wired to the sibling's package (react-native-worklets).
+  // The podspec file basename is the pod name for RN-ecosystem libs (and is
+  // cheap — no `pod ipc` pre-pass).
+  const podToNpm /*: Map<string, string> */ = new Map();
+  for (const dep of allDeps) {
+    const podspecPath = dep.platforms?.ios?.podspecPath;
+    if (typeof podspecPath === 'string' && podspecPath.length > 0) {
+      podToNpm.set(path.basename(podspecPath, '.podspec'), dep.name);
+    }
+  }
+
   const ctx /*: ScaffoldContext */ = {
     appRoot,
     projectRoot,
@@ -806,6 +866,7 @@ function scaffoldAll(
     force: opts.force === true,
     dryRun: opts.dryRun === true,
     cacheSlotLabel: opts.cacheSlotLabel ?? null,
+    podToNpm,
   };
   const skipSet /*: Set<string> */ = new Set(opts.skipDeps ?? []);
 

@@ -181,6 +181,7 @@ export type TargetEntry = {
 // ---------------------------------------------------------------------------
 export type AutolinkingIosPlatform = {
   sourceDir?: ?string,
+  podspecPath?: ?string,
   ...
 };
 // As parsed from autolinking.json — all fields optional because the JSON is
