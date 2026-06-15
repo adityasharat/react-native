@@ -459,6 +459,30 @@ end
     expect(content).toContain(SCAFFOLDER_MARKER);
   });
 
+  it('computes app paths relative to the libs/<SwiftName> symlink, not dep.root (fresh-resolve correctness)', () => {
+    makePodspec();
+    const result = scaffoldPackageSwiftForDep(makeDep(), makeCtx());
+    expect(result.status).toBe('written');
+    const content = fs.readFileSync(
+      path.join(depRoot, 'Package.swift'),
+      'utf8',
+    );
+    // swiftName = ReactNativeFoo; the autolinker references the dep via
+    // build/generated/autolinking/libs/ReactNativeFoo. SwiftPM resolves the
+    // manifest's relative paths against THAT location, so:
+    //   build/generated/ios  -> ../../../ios
+    //   build/xcframeworks    -> ../../../../xcframeworks
+    expect(content).toContain(
+      '.package(name: "React-GeneratedCode", path: "../../../ios")',
+    );
+    expect(content).toContain(
+      '.package(name: "ReactNative", path: "../../../../xcframeworks")',
+    );
+    // The old dep.root-relative form (doubled to …/autolinking/ios/build/...
+    // through the symlink) must NOT be emitted.
+    expect(content).not.toContain('../../ios/build/generated/ios');
+  });
+
   it('reports previouslyExisted=false for first-time scaffolds (so the CLI can prompt)', () => {
     makePodspec();
     const result = scaffoldPackageSwiftForDep(makeDep(), makeCtx());

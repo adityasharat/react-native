@@ -80,7 +80,10 @@ const {log} = makeLogger('scaffold-package-swift');
 // the scaffolder regenerates regardless of --force (the bump implies the
 // existing file is broken under current tooling). A file with the marker
 // but no version line is treated as v1.
-const SCAFFOLDER_VERSION = 7;
+// v8: relative app paths (codegen / xcframeworks) are now computed from the
+// autolinker's libs/<SwiftName> symlink location instead of the real dep.root,
+// fixing a doubled-path resolution failure on fresh SwiftPM resolves.
+const SCAFFOLDER_VERSION = 8;
 const SCAFFOLDER_VERSION_LINE_RE = /^\/\/ AUTO-SCAFFOLDED-VERSION: (\d+)$/m;
 
 const AUTOGEN_MARKER =
@@ -635,18 +638,35 @@ function scaffoldPackageSwiftForDep(
   }
 
   const spec = translatePodspecToSpmTarget(model, dep);
-  // Relative paths from the dep's package dir (where Package.swift lands)
-  // into the app — posix separators, as SPM expects.
-  const relFromDep = (...segments /*: Array<string> */) =>
+  // Relative paths into the app, embedded in the scaffolded Package.swift.
+  //
+  // The manifest is written to <dep.root>/Package.swift, but the autolinker
+  // references the dep through a symlink at
+  // <appRoot>/build/generated/autolinking/libs/<SwiftName>. On a fresh resolve
+  // SwiftPM interprets a manifest's relative `.package(path:)` entries against
+  // that SYMLINK location (it does not canonicalize the symlink first), so the
+  // paths must be relative to the symlink dir — NOT the real dep.root.
+  // Computing from dep.root produced a doubled path
+  // (…/autolinking/ios/build/generated/ios) → opaque "package manifest cannot
+  // be accessed" resolution failure. posix separators, as SPM expects.
+  const symlinkDir = path.join(
+    ctx.appRoot,
+    'build',
+    'generated',
+    'autolinking',
+    'libs',
+    spec.swiftName,
+  );
+  const relFromManifest = (...segments /*: Array<string> */) =>
     path
-      .relative(dep.root, path.join(ctx.appRoot, ...segments))
+      .relative(symlinkDir, path.join(ctx.appRoot, ...segments))
       .split(path.sep)
       .join('/');
   const content = emitScaffoldedPackageSwift(spec, {
     cacheSlotLabel: ctx.cacheSlotLabel,
     remote: remotePackageConfig(ctx.appRoot),
-    codegenPackageDir: relFromDep('build', 'generated', 'ios'),
-    localXcfwPackageDir: relFromDep('build', 'xcframeworks'),
+    codegenPackageDir: relFromManifest('build', 'generated', 'ios'),
+    localXcfwPackageDir: relFromManifest('build', 'xcframeworks'),
   });
 
   // Distinguish "first-time scaffold" (no file at all) from "regenerate"
