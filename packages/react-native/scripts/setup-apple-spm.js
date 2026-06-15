@@ -92,7 +92,9 @@ const {
 const {main: generatePackage} = require('./spm/generate-spm-package');
 const {findSourcePath} = require('./spm/generate-spm-package');
 const {
+  SPM_INJECTED_MARKER,
   SPM_MANAGED_MARKER,
+  injectSpmIntoExistingXcodeproj,
   main: generateXcodeproj,
 } = require('./spm/generate-spm-xcodeproj');
 const {scaffoldAll} = require('./spm/scaffold-package-swift');
@@ -108,6 +110,7 @@ const {
   remotePackageConfig,
   runCodegenAndInstallTemplate,
 } = require('./spm/spm-utils');
+const {execFileSync} = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -189,6 +192,17 @@ function parseArgs(argv /*: Array<string> */) /*: SetupArgs */ {
       describe:
         'Regenerate <App>-SPM.xcodeproj even if it already exists. WARNING: overwrites in-place Xcode edits (signing, capabilities, build phases). The xcodeproj is committed to your repo; SPM references stable sub-package paths under build/, so regeneration is not normally needed.',
     })
+    .option('from-scratch', {
+      type: 'boolean',
+      default: false,
+      describe:
+        '[init] Generate a brand-new <App>.xcodeproj (renaming the existing one to .legacy) instead of injecting SPM into the existing project in place (the default).',
+    })
+    .option('xcodeproj', {
+      type: 'string',
+      describe:
+        '[init] Path to the existing .xcodeproj to inject SPM packages into (disambiguates when several exist).',
+    })
     .option('bundle-identifier', {
       type: 'string',
       describe: 'Override CFBundleIdentifier in generated Info.plist',
@@ -265,6 +279,8 @@ function parseArgs(argv /*: Array<string> */) /*: SetupArgs */ {
     forceDownload: parsed['force-download'],
     skipXcodeproj: parsed['skip-xcodeproj'],
     forceXcodeproj: parsed['force-xcodeproj'],
+    fromScratch: parsed['from-scratch'],
+    xcodeprojPath: parsed.xcodeproj ?? null,
     bundleIdentifier: parsed['bundle-identifier'] ?? null,
     productName: parsed['product-name'] ?? null,
     entryFile: parsed['entry-file'] ?? null,
@@ -353,6 +369,17 @@ function gatherCleanTargets(
   const spmXcodeprojNames = listSpmXcodeprojs(appRoot).map(m => m.name);
 
   if (opts.project === true) {
+    // In-place-injected (user-owned) project: revert via git + drop marker
+    // rather than delete — we never owned the whole project.
+    const injected = findInjectedXcodeproj(appRoot);
+    if (injected != null) {
+      targets.push({
+        kind: 'git-revert',
+        path: injected,
+        appRoot,
+        label: `${path.basename(injected)} (git restore + remove SPM injection)`,
+      });
+    }
     for (const name of spmXcodeprojNames) {
       targets.push({
         kind: 'delete',
@@ -430,21 +457,44 @@ function cleanGeneratedState(
   // SPM `<App>.xcodeproj` still exists).
   const deletes /*: Array<{path: string, label: string}> */ = [];
   const renames /*: Array<{from: string, to: string, label: string}> */ = [];
+  const reverts /*: Array<{path: string, appRoot: string, label: string}> */ =
+    [];
   for (const t of targets) {
     if (t.kind === 'rename') {
       if (fs.existsSync(t.from)) {
         renames.push({from: t.from, to: t.to, label: t.label});
       }
+    } else if (t.kind === 'git-revert') {
+      if (fs.existsSync(t.path)) {
+        reverts.push({path: t.path, appRoot: t.appRoot, label: t.label});
+      }
     } else if (fs.existsSync(t.path)) {
       deletes.push({path: t.path, label: t.label});
     }
   }
-  const total = deletes.length + renames.length;
+  const total = deletes.length + renames.length + reverts.length;
   if (total === 0) {
     log('Nothing to clean.');
     return;
   }
   log(`Cleaning ${total} action(s)...`);
+  for (const r of reverts) {
+    // git restore the project dir (reverts pbxproj + tracked scheme edits),
+    // then drop the untracked injection marker.
+    try {
+      execFileSync('git', ['checkout', '--', r.path], {
+        cwd: r.appRoot,
+        stdio: ['ignore', 'ignore', 'ignore'],
+      });
+    } catch {
+      logError(
+        `  Could not git-restore ${r.label} (not committed?). Remove the SPM ` +
+          `package references manually or restore from version control.`,
+      );
+    }
+    fs.rmSync(path.join(r.path, SPM_INJECTED_MARKER), {force: true});
+    log(`  ${r.label}`);
+  }
   for (const d of deletes) {
     fs.rmSync(d.path, {recursive: true, force: true});
     log(`  Removed ${d.label}`);
@@ -499,7 +549,8 @@ function podfileNeedsPatch(
  * Finds the legacy (non-SPM) `*.xcodeproj` in `appRoot` — the one
  * CocoaPods should integrate with. "Legacy" means: a `*.xcodeproj`
  * directory that is NOT SPM-managed. SPM-managed xcodeprojs are
- * identified by the `.spm-managed` sidecar marker, OR by the historical
+ * identified by the `.spm-managed` sidecar marker (from-scratch) or the
+ * `.spm-injected.json` marker (in-place injection), OR by the historical
  * `-SPM.xcodeproj` filename suffix (backward compat with older
  * generator output).
  */
@@ -522,9 +573,13 @@ function findLegacyXcodeproj(appRoot /*: string */) /*: string | null */ {
       ) {
         return false;
       }
-      // A `<App>.xcodeproj/.spm-managed` marker means this is the SPM
-      // project sharing the legacy filename — not a CocoaPods target.
-      return !fs.existsSync(path.join(appRoot, name, SPM_MANAGED_MARKER));
+      // A `.spm-managed` (from-scratch) or `.spm-injected.json` (in-place)
+      // marker means this xcodeproj is ours — not a CocoaPods target to
+      // rename out of the way.
+      return (
+        !fs.existsSync(path.join(appRoot, name, SPM_MANAGED_MARKER)) &&
+        !fs.existsSync(path.join(appRoot, name, SPM_INJECTED_MARKER))
+      );
     })
     .map(e => {
       // $FlowFixMe[incompatible-type] Dirent.name is string|Buffer in Flow stubs; always string in our usage.
@@ -1242,6 +1297,99 @@ function generateXcodeProject(
 }
 
 /**
+ * Decide and run the xcodeproj strategy. The DEFAULT is in-place injection:
+ * add SPM packages to the user's EXISTING xcodeproj so their signing,
+ * capabilities, and extra targets survive. Falls back to (or is forced via
+ * `--from-scratch` into) the legacy generate-a-new-project + rename-legacy
+ * path when the project can't be safely edited or none exists.
+ *
+ * Returns the {from, to} legacy rename when one happened (from-scratch only),
+ * else null — used for the rollback hint in next-steps.
+ */
+async function setupXcodeproj(
+  args /*: SetupArgs */,
+  appRoot /*: string */,
+  reactNativeRoot /*: string */,
+  action /*: string */,
+) /*: Promise<{from: string, to: string} | null> */ {
+  if (args.skipXcodeproj) {
+    log('Skipping .xcodeproj setup (--skip-xcodeproj)');
+    return null;
+  }
+
+  // A previously generated from-scratch SPM project keeps using from-scratch.
+  // In-place injection runs on `init` (first setup) or whenever a prior
+  // in-place target exists (re-run on update keeps it idempotent).
+  const existingSpm = findExistingSpmXcodeproj(appRoot);
+  const injectedName = findInjectedXcodeproj(appRoot);
+  const inPlace =
+    !args.fromScratch &&
+    existingSpm == null &&
+    (action === 'init' || injectedName != null);
+
+  if (inPlace) {
+    // Pick the project to inject into: explicit override > a prior in-place
+    // target (re-run) > the user's existing (legacy) project (init only).
+    const legacyName = action === 'init' ? findLegacyXcodeproj(appRoot) : null;
+    const xcodeprojPath =
+      args.xcodeprojPath != null
+        ? path.resolve(appRoot, args.xcodeprojPath)
+        : (injectedName ??
+          (legacyName != null ? path.join(appRoot, legacyName) : null));
+
+    if (xcodeprojPath != null && fs.existsSync(xcodeprojPath)) {
+      // No backup is made — git is the safety net. Refuse on a dirty/untracked
+      // pbxproj unless --yes (so a bad inject is always `git checkout`-able).
+      const pbxprojPath = path.join(xcodeprojPath, 'project.pbxproj');
+      const clean = gitTrackedAndClean(appRoot, pbxprojPath);
+      if (clean === false && !args.cleanYes) {
+        const proceed = await promptYesNo(
+          `${path.basename(xcodeprojPath)} has uncommitted changes and no ` +
+            `backup is made (git is the only undo). Inject SPM packages anyway?`,
+          false,
+        );
+        if (!proceed) {
+          log('Aborted. Commit or stash the project, then re-run `spm init`.');
+          process.exitCode = 1;
+          throw new Error('In-place injection declined (dirty working tree)');
+        }
+      } else if (clean === null) {
+        log(
+          `\x1b[33mNote: ${path.basename(xcodeprojPath)} is not in a git ` +
+            `repo — no backup is made before in-place injection.\x1b[0m`,
+        );
+      }
+
+      const result = injectSpmIntoExistingXcodeproj({
+        appRoot,
+        reactNativeRoot,
+        xcodeprojPath,
+        appName: args.productName,
+      });
+      if (result.status === 'injected') {
+        return null;
+      }
+      log(
+        `In-place injection not possible (${result.reason}); ` +
+          `falling back to generating a new xcodeproj.`,
+      );
+      // fall through to from-scratch below
+    }
+    // No existing project to inject into → from-scratch generates one.
+  }
+
+  // From-scratch: on init, rename any legacy CocoaPods project first so the
+  // generated project can take the `<App>.xcodeproj` slot. On update/scaffold
+  // the project already exists (generateXcodeProject skips unless --force).
+  let rename = null;
+  if (action === 'init') {
+    rename = await maybeMigrateLegacyXcodeproj(args, appRoot);
+  }
+  generateXcodeProject(args, appRoot, reactNativeRoot);
+  return rename;
+}
+
+/**
  * Lists every SPM-managed xcodeproj directly inside `appRoot`. A xcodeproj
  * is SPM-managed if it carries the `.spm-managed` sidecar marker or if its
  * name still has the legacy `-SPM.xcodeproj` suffix (backward compat).
@@ -1276,6 +1424,46 @@ function listSpmXcodeprojs(
 function findExistingSpmXcodeproj(appRoot /*: string */) /*: string | null */ {
   const matches = listSpmXcodeprojs(appRoot);
   return (matches.find(m => m.hasMarker) ?? matches[0])?.absPath ?? null;
+}
+
+// Returns the `*.xcodeproj` carrying a `.spm-injected.json` marker (the
+// user-owned project SPM packages were injected into in place), else null.
+function findInjectedXcodeproj(appRoot /*: string */) /*: string | null */ {
+  let entries /*: Array<{name: string, isDirectory(): boolean}> */;
+  try {
+    // $FlowFixMe[incompatible-type] Dirent typing
+    entries = fs.readdirSync(appRoot, {withFileTypes: true});
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    // $FlowFixMe[incompatible-type] Dirent.name is string|Buffer in Flow stubs
+    const name /*: string */ = entry.name;
+    if (!name.endsWith('.xcodeproj')) continue;
+    if (fs.existsSync(path.join(appRoot, name, SPM_INJECTED_MARKER))) {
+      return path.join(appRoot, name);
+    }
+  }
+  return null;
+}
+
+// True when `git status --porcelain` reports the path dirty/untracked. Returns
+// null when git is unavailable or the path is outside a repo (no safety net).
+function gitTrackedAndClean(
+  appRoot /*: string */,
+  targetPath /*: string */,
+) /*: boolean | null */ {
+  try {
+    const out = execFileSync(
+      'git',
+      ['status', '--porcelain', '--', targetPath],
+      {cwd: appRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore']},
+    );
+    return out.trim() === '';
+  } catch {
+    return null; // not a git repo / git missing
+  }
 }
 
 function logNextSteps(
@@ -1546,36 +1734,34 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
   // so no path-locator JSON is written.
   buildPerAppHeaderTree(appRoot, {log});
 
-  let migrationRename /*: {from: string, to: string} | null */ = null;
   if (action === 'init') {
     ensureGitignoreSpmEntries(appRoot);
-
-    // Rename `<App>.xcodeproj` → `<App>.xcodeproj.legacy` so the SPM
-    // generator can use the bare `<App>.xcodeproj` slot. Must run BEFORE
-    // generateXcodeProject — otherwise the generator's safety check
-    // refuses (it won't clobber a legacy without a backup).
-    try {
-      migrationRename = await maybeMigrateLegacyXcodeproj(args, appRoot);
-    } catch (e) {
-      logError(`Legacy xcodeproj migration failed: ${e.message}.`);
-      return;
-    }
   }
 
+  // Xcodeproj setup. Default = in-place injection into the existing project
+  // (no rename, git is the safety net); falls back to / forced into the
+  // from-scratch + rename-legacy path. A non-null rename means from-scratch
+  // ran and a legacy CocoaPods project was set aside.
+  let migrationRename /*: {from: string, to: string} | null */ = null;
   try {
-    generateXcodeProject(args, appRoot, reactNativeRoot);
+    migrationRename = await setupXcodeproj(
+      args,
+      appRoot,
+      reactNativeRoot,
+      action,
+    );
   } catch (e) {
-    logError(`generate-spm-xcodeproj.js failed: ${e.message}`);
-    process.exitCode = 1;
+    logError(`xcodeproj setup failed: ${e.message}`);
+    if (process.exitCode == null) {
+      process.exitCode = 1;
+    }
     return;
   }
 
-  // On `init` only: the Podfile-patch flow is now mostly obsolete because
-  // the rename migration eliminates the dual-xcodeproj ambiguity that drove
-  // it. It still runs defensively in case the user has a Podfile and an
-  // unmigrated legacy somehow remains (e.g. they restored `.legacy` →
-  // active and re-ran init).
-  if (action === 'init') {
+  // Podfile-patch only matters in the from-scratch coexistence case (a legacy
+  // CocoaPods project was renamed and sits alongside the SPM one). In-place
+  // injection has a single project, so there's nothing to disambiguate.
+  if (action === 'init' && migrationRename != null) {
     try {
       await maybePatchPodfile(args, appRoot);
     } catch (e) {
@@ -1597,6 +1783,7 @@ module.exports = {
   decideLegacyMigration,
   detectStandardRnLayoutRedirect,
   findExistingSpmXcodeproj,
+  findInjectedXcodeproj,
   findLegacyXcodeproj,
   podfileNeedsPatch,
   resolveAction,

@@ -11,15 +11,32 @@
 'use strict';
 
 const {
+  addArrayMembers,
+  addArrayStringValues,
+  ensureScalarField,
   fileTypeForExtension,
+  findApplicationTargets,
+  findField,
+  findObjectByUuid,
+  findProjectObject,
   generateUUID,
+  insertObjectsIntoSection,
+  namespacedUUID,
   quoteIfNeeded,
   scanProjectFiles,
+  scanToClose,
+  serializeEntry,
   serializePbxproj,
+  uuidsInArray,
 } = require('../spm-pbxproj');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+
+const PLAIN_PBXPROJ = fs.readFileSync(
+  path.join(__dirname, '__fixtures__', 'plain-app.pbxproj'),
+  'utf8',
+);
 
 // ---------------------------------------------------------------------------
 // generateUUID
@@ -224,5 +241,166 @@ describe('serializePbxproj', () => {
     expect(result).toContain('/* End PBXBuildFile section */');
     expect(result).toContain('ABC123 /* test file */');
     expect(result).toContain('isa = PBXBuildFile;');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Surgical-edit toolkit (in-place injection primitives)
+// ---------------------------------------------------------------------------
+
+describe('namespacedUUID', () => {
+  it('is deterministic and 24-hex', () => {
+    const a = namespacedUUID('ROOT', 'sec', 'id');
+    expect(a).toMatch(/^[0-9A-F]{24}$/);
+    expect(namespacedUUID('ROOT', 'sec', 'id')).toBe(a);
+  });
+
+  it('differs by root, section, id, and salt', () => {
+    const base = namespacedUUID('ROOT', 'sec', 'id');
+    expect(namespacedUUID('OTHER', 'sec', 'id')).not.toBe(base);
+    expect(namespacedUUID('ROOT', 'other', 'id')).not.toBe(base);
+    expect(namespacedUUID('ROOT', 'sec', 'other')).not.toBe(base);
+    expect(namespacedUUID('ROOT', 'sec', 'id', '2')).not.toBe(base);
+  });
+});
+
+describe('scanToClose', () => {
+  it('matches braces and parens, skipping quoted delimiters', () => {
+    const t = 'x = { a = ("a)b"); };';
+    const open = t.indexOf('{');
+    expect(t[scanToClose(t, open)]).toBe('}');
+    const paren = t.indexOf('(');
+    // The ")" inside the quoted string must not close the paren early.
+    expect(scanToClose(t, paren)).toBe(t.indexOf(');') + 0);
+  });
+});
+
+describe('findObjectByUuid / findField', () => {
+  it('locates an object body and reads scalar + array fields', () => {
+    const target = findApplicationTargets(PLAIN_PBXPROJ)[0];
+    expect(target.name).toBe('MyApp');
+    const obj = findObjectByUuid(PLAIN_PBXPROJ, target.uuid);
+    expect(obj).not.toBeNull();
+    const productType = findField(PLAIN_PBXPROJ, obj, 'productType');
+    expect(productType.value).toContain('application');
+    const buildPhases = findField(PLAIN_PBXPROJ, obj, 'buildPhases');
+    expect(uuidsInArray(buildPhases.value).size).toBe(3);
+  });
+
+  it('returns null for an absent field', () => {
+    const project = findProjectObject(PLAIN_PBXPROJ);
+    expect(findField(PLAIN_PBXPROJ, project, 'packageReferences')).toBeNull();
+  });
+});
+
+describe('addArrayMembers', () => {
+  it('creates an absent array field after the body open', () => {
+    const project = findProjectObject(PLAIN_PBXPROJ);
+    const out = addArrayMembers(PLAIN_PBXPROJ, project, 'packageReferences', [
+      {uuid: 'CAFE0000000000000000CAFE', comment: 'ref'},
+    ]);
+    expect(out).toMatch(/packageReferences = \(/);
+    expect(out).toContain('CAFE0000000000000000CAFE /* ref */');
+  });
+
+  it('appends to and dedupes an existing array', () => {
+    const target = findApplicationTargets(PLAIN_PBXPROJ)[0];
+    const member = [{uuid: 'AA0000000000000000000301'}]; // already in buildPhases
+    const out = addArrayMembers(PLAIN_PBXPROJ, target, 'buildPhases', member);
+    // Dedup: no second occurrence added.
+    expect(out.match(/AA0000000000000000000301/g)).toHaveLength(
+      PLAIN_PBXPROJ.match(/AA0000000000000000000301/g).length,
+    );
+  });
+
+  it('prepends when requested', () => {
+    const target = findApplicationTargets(PLAIN_PBXPROJ)[0];
+    const out = addArrayMembers(
+      PLAIN_PBXPROJ,
+      target,
+      'buildPhases',
+      [{uuid: 'BEEF0000000000000000BEEF', comment: 'First'}],
+      {prepend: true},
+    );
+    const firstIdx = out.indexOf('BEEF0000000000000000BEEF');
+    const sourcesIdx = out.indexOf('AA0000000000000000000301 /* Sources */');
+    expect(firstIdx).toBeLessThan(sourcesIdx);
+  });
+});
+
+describe('addArrayStringValues', () => {
+  function targetDebugDict(text) {
+    const cfg = findObjectByUuid(text, 'AA0000000000000000000901');
+    const bs = findField(text, cfg, 'buildSettings');
+    return {uuid: 'x', bodyOpen: bs.valueStart, bodyClose: bs.tokenEnd - 1};
+  }
+
+  it('creates an array seeded with $(inherited)', () => {
+    const out = addArrayStringValues(
+      PLAIN_PBXPROJ,
+      targetDebugDict(PLAIN_PBXPROJ),
+      'OTHER_LDFLAGS',
+      ['"-ObjC"'],
+    );
+    expect(out).toMatch(/OTHER_LDFLAGS = \(/);
+    expect(out).toContain('"$(inherited)"');
+    expect(out).toContain('"-ObjC"');
+  });
+
+  it('promotes an existing scalar to an array, preserving the old value', () => {
+    const scalar = PLAIN_PBXPROJ.replace(
+      'PRODUCT_NAME = "$(TARGET_NAME)";',
+      'OTHER_LDFLAGS = "-lz"; PRODUCT_NAME = "$(TARGET_NAME)";',
+    );
+    const out = addArrayStringValues(
+      scalar,
+      targetDebugDict(scalar),
+      'OTHER_LDFLAGS',
+      ['"-ObjC"'],
+    );
+    expect(out).toMatch(/OTHER_LDFLAGS = \(/);
+    expect(out).toContain('"-lz"');
+    expect(out).toContain('"-ObjC"');
+  });
+});
+
+describe('ensureScalarField', () => {
+  it('adds a scalar only when absent', () => {
+    const project = findProjectObject(PLAIN_PBXPROJ);
+    const out = ensureScalarField(
+      PLAIN_PBXPROJ,
+      project,
+      'ORGANIZATIONNAME',
+      'Acme',
+    );
+    expect(out).toContain('ORGANIZATIONNAME = Acme;');
+    // Re-running is a no-op.
+    const project2 = findProjectObject(out);
+    expect(ensureScalarField(out, project2, 'ORGANIZATIONNAME', 'Other')).toBe(
+      out,
+    );
+  });
+});
+
+describe('insertObjectsIntoSection', () => {
+  it('creates a new section before the objects dict closes', () => {
+    const entry = serializeEntry({
+      uuid: 'DEAD0000000000000000DEAD',
+      comment: 'XCLocalSwiftPackageReference "x"',
+      fields: {isa: 'XCLocalSwiftPackageReference', relativePath: 'x'},
+    });
+    const out = insertObjectsIntoSection(
+      PLAIN_PBXPROJ,
+      'XCLocalSwiftPackageReference',
+      entry,
+    );
+    expect(out).toContain(
+      '/* Begin XCLocalSwiftPackageReference section */',
+    );
+    expect(out).toContain('DEAD0000000000000000DEAD');
+    // Still inside the objects dict (before rootObject).
+    expect(out.indexOf('DEAD0000000000000000DEAD')).toBeLessThan(
+      out.indexOf('rootObject ='),
+    );
   });
 });

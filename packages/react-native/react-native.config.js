@@ -159,6 +159,19 @@ const spmCommand /*: Command */ = {
         'Clobbers Xcode-side edits (signing, capabilities, Build Phases).',
     },
     {
+      name: '--fromScratch',
+      description:
+        '[init] Generate a brand-new <App>.xcodeproj (renaming the existing ' +
+        'one to .legacy) instead of the default in-place injection into the ' +
+        'existing project.',
+    },
+    {
+      name: '--xcodeproj <path>',
+      description:
+        '[init] Path to the existing .xcodeproj to inject SPM packages into ' +
+        '(disambiguates when several exist).',
+    },
+    {
       name: '--bundleIdentifier <string>',
       description: 'Override CFBundleIdentifier in the generated Info.plist.',
     },
@@ -217,6 +230,7 @@ const spmCommand /*: Command */ = {
       ['bundleIdentifier', '--bundle-identifier'],
       ['productName', '--product-name'],
       ['entryFile', '--entry-file'],
+      ['xcodeproj', '--xcodeproj'],
     ];
     for (const [key, flag] of stringOpts) {
       if (args[key] != null) {
@@ -229,6 +243,7 @@ const spmCommand /*: Command */ = {
       ['forceDownload', '--force-download'],
       ['skipXcodeproj', '--skip-xcodeproj'],
       ['forceXcodeproj', '--force-xcodeproj'],
+      ['fromScratch', '--from-scratch'],
       ['project', '--project'],
       ['derivedData', '--derived-data'],
       ['cache', '--cache'],

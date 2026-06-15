@@ -45,6 +45,23 @@ export type SetupArgs = {
   cleanCache: boolean,
   cleanAll: boolean,
   cleanYes: boolean,
+  // `init` xcodeproj strategy. Default is in-place injection: add SPM packages
+  // to the user's EXISTING xcodeproj so hand-tuned signing / capabilities /
+  // extra targets survive (falls back to from-scratch when the project can't
+  // be safely edited, e.g. CocoaPods-integrated). `fromScratch` forces the
+  // legacy generate-a-new-xcodeproj + rename-legacy path. `xcodeprojPath`
+  // overrides which existing project to inject into (disambiguates multiple).
+  fromScratch: boolean,
+  xcodeprojPath: string | null,
+};
+
+// Result of in-place injection into an existing xcodeproj — recorded in the
+// `.spm-injected.json` sidecar so `clean` can revert and re-runs stay
+// idempotent.
+export type SpmInjectionResult = {
+  rootUuid: string,
+  target: string,
+  injectedUuids: Array<string>,
 };
 
 export type CleanOpts = {
@@ -71,6 +88,15 @@ export type CleanTarget =
       kind: 'rename',
       from: string,
       to: string,
+      label: string,
+    }
+  // Revert an in-place-injected xcodeproj: `git checkout` the project dir
+  // (undoing the pbxproj/scheme edits) then drop the `.spm-injected.json`
+  // marker. `path` is the .xcodeproj dir; `appRoot` is the git cwd.
+  | {
+      kind: 'git-revert',
+      path: string,
+      appRoot: string,
       label: string,
     };
 

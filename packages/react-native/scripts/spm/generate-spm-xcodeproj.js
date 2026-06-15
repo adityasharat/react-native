@@ -41,10 +41,20 @@
 
 const {findSourcePath} = require('./generate-spm-package');
 const {
+  addArrayMembers,
+  addArrayStringValues,
+  ensureScalarField,
   fileTypeForExtension,
+  findApplicationTargets,
+  findField,
+  findObjectByUuid,
+  findProjectObject,
   generateUUID,
+  insertObjectsIntoSection,
+  namespacedUUID,
   quoteIfNeeded,
   scanProjectFiles,
+  serializeEntry,
   serializePbxproj,
 } = require('./spm-pbxproj');
 const {
@@ -64,6 +74,12 @@ const {log} = makeLogger('generate-spm-xcodeproj');
 // `<App>.xcodeproj` from a legacy CocoaPods one with the same filename.
 const SPM_MANAGED_MARKER = '.spm-managed';
 const SPM_MANAGED_MARKER_HEADER = '# Managed by `npx react-native spm`.';
+
+// Sidecar inside a USER-OWNED xcodeproj that SPM packages were injected into
+// in place (as opposed to a from-scratch SPM-managed project). Records the
+// host project's root UUID + every UUID we added so `clean` can revert and
+// re-runs stay idempotent.
+const SPM_INJECTED_MARKER = '.spm-injected.json';
 
 function parseArgs(argv /*: Array<string> */) /*: GenerateXcodeprojArgs */ {
   const parsed = yargs(argv)
@@ -160,7 +176,132 @@ const SPM_PRODUCT_PACKAGES /*: Array<{product: string, packagePath: string, pack
     },
   ];
 
-const SPM_PRODUCTS = SPM_PRODUCT_PACKAGES.map(p => p.product);
+/*::
+type RemoteCfg = {url: string, version: string, identity: string};
+type SpmGraph = {
+  uniquePackages: Array<{packagePath: string, packageName: string}>,
+  localPkgRefs: Array<{uuid: string, packagePath: string, comment: string}>,
+  remotePkgRef: ?{uuid: string, url: string, version: string, identity: string, comment: string},
+  products: Array<{product: string, depUuid: string, buildFileUuid: string, pkgRefUuid: string, refComment: string}>,
+};
+*/
+
+/**
+ * Resolve the SPM dependency graph (package references + product
+ * dependencies + their frameworks build files) from SPM_PRODUCT_PACKAGES.
+ * `mkUuid(section, id)` supplies UUIDs — the from-scratch generator seeds it
+ * with the app name, the in-place injector seeds it with the host project's
+ * root UUID. Sharing this builder keeps both paths' SPM wiring identical.
+ */
+function buildSpmDependencyGraph(
+  mkUuid /*: (section: string, id: string) => string */,
+  remote /*: ?RemoteCfg */,
+) /*: SpmGraph */ {
+  // Remote mode: ReactNative-family products move to the remote package.
+  const productPackages = SPM_PRODUCT_PACKAGES.map(e =>
+    remote != null && e.packagePath === 'build/xcframeworks'
+      ? {...e, packagePath: 'REMOTE', packageName: remote.identity}
+      : e,
+  );
+  const uniquePackages = Array.from(
+    new Map(
+      productPackages
+        .filter(e => e.packagePath !== 'REMOTE')
+        .map(e => [
+          e.packagePath,
+          {packagePath: e.packagePath, packageName: e.packageName},
+        ]),
+    ).values(),
+  );
+  const localPkgRefs = uniquePackages.map(pkg => ({
+    uuid: mkUuid('XCLocalSwiftPackageReference', pkg.packagePath),
+    packagePath: pkg.packagePath,
+    comment: `XCLocalSwiftPackageReference "${pkg.packagePath}"`,
+  }));
+  const remotePkgRef =
+    remote != null
+      ? {
+          uuid: mkUuid('XCRemoteSwiftPackageReference', remote.url),
+          url: remote.url,
+          version: remote.version,
+          identity: remote.identity,
+          comment: `XCRemoteSwiftPackageReference "${remote.identity}"`,
+        }
+      : null;
+  const localByPath = new Map(localPkgRefs.map(r => [r.packagePath, r]));
+  const products = productPackages.map(entry => {
+    const {product, packagePath} = entry;
+    const isRemote = packagePath === 'REMOTE' && remotePkgRef != null;
+    const pkgRefUuid = isRemote
+      ? // $FlowFixMe[incompatible-use] guarded by isRemote
+        remotePkgRef.uuid
+      : // $FlowFixMe[incompatible-use] every non-REMOTE path is in localByPath
+        localByPath.get(packagePath).uuid;
+    const refComment = isRemote
+      ? // $FlowFixMe[incompatible-use] guarded by isRemote
+        `XCRemoteSwiftPackageReference "${remotePkgRef.identity}"`
+      : `XCLocalSwiftPackageReference "${packagePath}"`;
+    return {
+      product,
+      depUuid: mkUuid('XCSwiftPackageProductDependency', product),
+      buildFileUuid: mkUuid('PBXBuildFile', `spm:${product}`),
+      pkgRefUuid,
+      refComment,
+    };
+  });
+  return {uniquePackages, localPkgRefs, remotePkgRef, products};
+}
+
+/**
+ * Render the SPM graph into pbxproj section entry objects (the same shapes the
+ * from-scratch generator emits). Used by the in-place injector to splice these
+ * objects into an existing project.
+ */
+/*:: type PbxEntryT = {uuid: string, comment: string, fields: {[string]: string}}; */
+
+function spmGraphToEntries(
+  graph /*: SpmGraph */,
+) /*: {localRefs: Array<PbxEntryT>, remoteRef: ?PbxEntryT, productDeps: Array<PbxEntryT>, buildFiles: Array<PbxEntryT>} */ {
+  const localRefs /*: Array<PbxEntryT> */ = graph.localPkgRefs.map(ref => ({
+    uuid: ref.uuid,
+    comment: ref.comment,
+    fields: {
+      isa: 'XCLocalSwiftPackageReference',
+      relativePath: quoteIfNeeded(ref.packagePath),
+    },
+  }));
+  const remote = graph.remotePkgRef;
+  const remoteRef /*: ?PbxEntryT */ =
+    remote != null
+      ? {
+          uuid: remote.uuid,
+          comment: remote.comment,
+          fields: {
+            isa: 'XCRemoteSwiftPackageReference',
+            repositoryURL: quoteIfNeeded(remote.url),
+            requirement: `{\n\t\t\t\tkind = exactVersion;\n\t\t\t\tversion = "${remote.version}";\n\t\t\t}`,
+          },
+        }
+      : null;
+  const productDeps /*: Array<PbxEntryT> */ = graph.products.map(p => ({
+    uuid: p.depUuid,
+    comment: p.product,
+    fields: {
+      isa: 'XCSwiftPackageProductDependency',
+      package: `${p.pkgRefUuid} /* ${p.refComment} */`,
+      productName: quoteIfNeeded(p.product),
+    },
+  }));
+  const buildFiles /*: Array<PbxEntryT> */ = graph.products.map(p => ({
+    uuid: p.buildFileUuid,
+    comment: `${p.product} in Frameworks`,
+    fields: {
+      isa: 'PBXBuildFile',
+      productRef: `${p.depUuid} /* ${p.product} */`,
+    },
+  }));
+  return {localRefs, remoteRef, productDeps, buildFiles};
+}
 
 function generatePbxproj(
   opts /*: {
@@ -238,33 +379,18 @@ function generatePbxproj(
   );
   // Remote SPM package mode: the ReactNative-family products reference the
   // remote package (XCRemoteSwiftPackageReference) instead of the local
-  // artifacts package.
+  // artifacts package. The SPM graph (package refs + product deps + their
+  // frameworks build files) is resolved by the shared builder so the
+  // from-scratch and in-place-injection paths stay identical.
   const remote = appRoot != null ? remotePackageConfig(appRoot) : null;
-  const productPackages = SPM_PRODUCT_PACKAGES.map(e =>
-    remote != null && e.packagePath === 'build/xcframeworks'
-      ? {...e, packagePath: 'REMOTE', packageName: remote.identity}
-      : e,
+  const spmGraph = buildSpmDependencyGraph(
+    (section, id) => uuid(appName, section, id),
+    remote,
   );
+  const uniquePackages = spmGraph.uniquePackages;
+  const localPkgRefUUIDs = spmGraph.localPkgRefs.map(r => r.uuid);
   const remotePkgRefUUID =
-    remote != null
-      ? uuid(appName, 'XCRemoteSwiftPackageReference', remote.url)
-      : null;
-
-  // Dedupe sub-package references by path (multiple products share a package).
-  const uniquePackages /*: Array<{packagePath: string, packageName: string}> */ =
-    Array.from(
-      new Map(
-        productPackages
-          .filter(e => e.packagePath !== 'REMOTE')
-          .map(e => [
-            e.packagePath,
-            {packagePath: e.packagePath, packageName: e.packageName},
-          ]),
-      ).values(),
-    );
-  const localPkgRefUUIDs = uniquePackages.map(pkg =>
-    uuid(appName, 'XCLocalSwiftPackageReference', pkg.packagePath),
-  );
+    spmGraph.remotePkgRef != null ? spmGraph.remotePkgRef.uuid : null;
 
   /*:: type PbxEntry = {uuid: string, comment: string, fields: {[string]: string}}; */
 
@@ -390,45 +516,13 @@ function generatePbxproj(
     },
   });
 
-  // SPM package product dependencies
-  const spmDepEntries /*: Array<PbxEntry> */ = [];
-  const spmDepUUIDs /*: Array<string> */ = [];
-  for (const entry of productPackages) {
-    const {product, packagePath} = entry;
-    const depUUID = uuid(appName, 'XCSwiftPackageProductDependency', product);
-    spmDepUUIDs.push(depUUID);
-
-    // Also need a build file for each SPM product dependency
-    const spmBuildFileId = uuid(appName, 'PBXBuildFile', `spm:${product}`);
-    buildFileEntries.push({
-      uuid: spmBuildFileId,
-      comment: `${product} in Frameworks`,
-      fields: {
-        isa: 'PBXBuildFile',
-        productRef: `${depUUID} /* ${product} */`,
-      },
-    });
-
-    // Link this product dependency to its package reference (local or remote).
-    // Test remotePkgRefUUID directly in the ternary (not via an intermediate
-    // boolean) so Flow refines away its null in the remote branch.
-    const pkgRefUUID =
-      packagePath === 'REMOTE' && remotePkgRefUUID != null
-        ? remotePkgRefUUID
-        : uuid(appName, 'XCLocalSwiftPackageReference', packagePath);
-    const isRemote = packagePath === 'REMOTE' && remotePkgRefUUID != null;
-    const refComment = isRemote
-      ? `XCRemoteSwiftPackageReference "${remote?.identity ?? ''}"`
-      : `XCLocalSwiftPackageReference "${packagePath}"`;
-    spmDepEntries.push({
-      uuid: depUUID,
-      comment: product,
-      fields: {
-        isa: 'XCSwiftPackageProductDependency',
-        package: `${pkgRefUUID} /* ${refComment} */`,
-        productName: quoteIfNeeded(product),
-      },
-    });
+  // SPM package product dependencies + their frameworks build files, rendered
+  // from the shared graph so the entry shapes match the injector exactly.
+  const spmEntries = spmGraphToEntries(spmGraph);
+  const spmDepEntries /*: Array<PbxEntry> */ = spmEntries.productDeps;
+  const spmDepUUIDs /*: Array<string> */ = spmGraph.products.map(p => p.depUuid);
+  for (const bf of spmEntries.buildFiles) {
+    buildFileEntries.push(bf);
   }
 
   const bundleJSScript = `set -e
@@ -449,9 +543,7 @@ REACT_NATIVE_XCODE="${reactNativePath}/scripts/react-native-xcode.sh"
 
   sections.PBXFileReference = fileRefEntries;
 
-  const frameworkBuildFileUUIDs = SPM_PRODUCTS.map(product =>
-    uuid(appName, 'PBXBuildFile', `spm:${product}`),
-  );
+  const frameworkBuildFileUUIDs = spmGraph.products.map(p => p.buildFileUuid);
   sections.PBXFrameworksBuildPhase = [
     {
       uuid: frameworksBuildPhaseUUID,
@@ -572,33 +664,6 @@ REACT_NATIVE_XCODE="${reactNativePath}/scripts/react-native-xcode.sh"
   // phase (safety net) and the scheme pre-action (the one that actually
   // runs before SPM resolution).
   const syncAutolinkingScript = buildSyncAutolinkingScript(reactNativePath);
-
-  // Helper: create a PBXShellScriptBuildPhase entry
-  function shellScriptPhase(
-    phaseUUID /*: string */,
-    name /*: string */,
-    script /*: string */,
-    options /*: {inputPaths?: string, outputPaths?: string} */ = {},
-  ) /*: PbxEntry */ {
-    const empty = '(\n\t\t\t)';
-    return {
-      uuid: phaseUUID,
-      comment: name,
-      fields: {
-        isa: 'PBXShellScriptBuildPhase',
-        buildActionMask: '2147483647',
-        files: empty,
-        inputFileListPaths: empty,
-        inputPaths: options.inputPaths ?? empty,
-        name: quoteIfNeeded(name),
-        outputFileListPaths: empty,
-        outputPaths: options.outputPaths ?? empty,
-        runOnlyForDeploymentPostprocessing: '0',
-        shellPath: '/bin/sh',
-        shellScript: quoteIfNeeded(script),
-      },
-    };
-  }
 
   sections.PBXShellScriptBuildPhase = [
     shellScriptPhase(
@@ -727,29 +792,10 @@ REACT_NATIVE_XCODE="${reactNativePath}/scripts/react-native-xcode.sh"
     },
   ];
 
-  sections.XCLocalSwiftPackageReference = [
-    ...uniquePackages.map((pkg, i) => ({
-      uuid: localPkgRefUUIDs[i],
-      comment: `XCLocalSwiftPackageReference "${pkg.packagePath}"`,
-      fields: {
-        isa: 'XCLocalSwiftPackageReference',
-        relativePath: quoteIfNeeded(pkg.packagePath),
-      },
-    })),
-  ];
+  sections.XCLocalSwiftPackageReference = spmEntries.localRefs;
 
-  if (remote != null && remotePkgRefUUID != null) {
-    sections.XCRemoteSwiftPackageReference = [
-      {
-        uuid: remotePkgRefUUID,
-        comment: `XCRemoteSwiftPackageReference "${remote.identity}"`,
-        fields: {
-          isa: 'XCRemoteSwiftPackageReference',
-          repositoryURL: quoteIfNeeded(remote.url),
-          requirement: `{\n\t\t\t\tkind = exactVersion;\n\t\t\t\tversion = "${remote.version}";\n\t\t\t}`,
-        },
-      },
-    ];
+  if (spmEntries.remoteRef != null) {
+    sections.XCRemoteSwiftPackageReference = [spmEntries.remoteRef];
   }
 
   sections.XCSwiftPackageProductDependency = spmDepEntries;
@@ -761,6 +807,34 @@ REACT_NATIVE_XCODE="${reactNativePath}/scripts/react-native-xcode.sh"
 // the build phase (safety net) and the scheme pre-action (the one that
 // actually fires before SPM resolution, so a single build picks up
 // dep-graph changes from `npm install`).
+// Build a PBXShellScriptBuildPhase entry. Module-scoped so both the
+// from-scratch generator and the in-place injector emit identical phases.
+function shellScriptPhase(
+  phaseUUID /*: string */,
+  name /*: string */,
+  script /*: string */,
+  options /*: {inputPaths?: string, outputPaths?: string} */ = {},
+) /*: {uuid: string, comment: string, fields: {[string]: string}} */ {
+  const empty = '(\n\t\t\t)';
+  return {
+    uuid: phaseUUID,
+    comment: name,
+    fields: {
+      isa: 'PBXShellScriptBuildPhase',
+      buildActionMask: '2147483647',
+      files: empty,
+      inputFileListPaths: empty,
+      inputPaths: options.inputPaths ?? empty,
+      name: quoteIfNeeded(name),
+      outputFileListPaths: empty,
+      outputPaths: options.outputPaths ?? empty,
+      runOnlyForDeploymentPostprocessing: '0',
+      shellPath: '/bin/sh',
+      shellScript: quoteIfNeeded(script),
+    },
+  };
+}
+
 function buildSyncAutolinkingScript(
   reactNativePath /*: string */,
 ) /*: string */ {
@@ -1117,6 +1191,490 @@ function ensureStubPackages(appRoot /*: string */) /*: void */ {
   }
 }
 
+// ---------------------------------------------------------------------------
+// In-place injection: add SPM packages to a user's EXISTING xcodeproj.
+//
+// Unlike the from-scratch generator above, this never creates a target or
+// scans sources — it splices the SPM dependency graph, the React build
+// settings, and the sync build phase / scheme pre-action into the project the
+// user already owns, leaving everything else byte-identical. Used as the
+// default `spm init` path so hand-tuned signing / capabilities / extra targets
+// survive. Refuses (so the caller can fall back to from-scratch) when the
+// project is CocoaPods-integrated or its shape can't be safely anchored.
+// ---------------------------------------------------------------------------
+
+// The React build settings the app target needs to compile against the SPM
+// products. Mirrors targetBuildSettings() in the from-scratch generator.
+const INJECTED_ARRAY_SETTINGS = [
+  {
+    key: 'HEADER_SEARCH_PATHS',
+    values: ['"$(SRCROOT)/build/generated/autolinking/headers"'],
+  },
+  {key: 'OTHER_LDFLAGS', values: ['"-ObjC"']},
+  {
+    key: 'OTHER_SWIFT_FLAGS',
+    values: [
+      '"-Xcc"',
+      '"-fmodule-map-file=$(BUILT_PRODUCTS_DIR)/React.framework/Modules/module.modulemap"',
+    ],
+  },
+];
+
+/** The XCBuildConfiguration UUIDs of a target (via its buildConfigurationList). */
+function targetBuildConfigUuids(
+  text /*: string */,
+  targetObj /*: {bodyOpen: number, bodyClose: number, ...} */,
+) /*: Array<string> */ {
+  const listField = findField(text, targetObj, 'buildConfigurationList');
+  if (listField == null) {
+    return [];
+  }
+  const listMatch = listField.value.match(/[0-9A-Fa-f]{24}/);
+  if (listMatch == null) {
+    return [];
+  }
+  const listObj = findObjectByUuid(text, listMatch[0]);
+  if (listObj == null) {
+    return [];
+  }
+  const configs = findField(text, listObj, 'buildConfigurations');
+  if (configs == null) {
+    return [];
+  }
+  const matches = configs.value.match(/[0-9A-Fa-f]{24}/g);
+  return matches != null ? Array.from(matches) : [];
+}
+
+/** True when a build config layers a CocoaPods `Pods-*.xcconfig`. */
+function configUsesPods(text /*: string */, configUuid /*: string */) /*: boolean */ {
+  const obj = findObjectByUuid(text, configUuid);
+  if (obj == null) {
+    return false;
+  }
+  const base = findField(text, obj, 'baseConfigurationReference');
+  return base != null && /Pods[-/]/.test(base.value);
+}
+
+/**
+ * Inspect an existing pbxproj and decide whether it can be injected. Returns
+ * the chosen app target + its config/frameworks anchors, or a refusal reason
+ * the caller turns into a from-scratch fallback.
+ */
+function planInjection(
+  text /*: string */,
+  opts /*: {appName?: ?string} */,
+) /*:
+  | {ok: true, rootUuid: string, target: {uuid: string, name: string, bodyOpen: number, bodyClose: number}, configUuids: Array<string>, frameworksPhaseUuid: string}
+  | {ok: false, reason: string} */ {
+  const project = findProjectObject(text);
+  if (project == null) {
+    return {ok: false, reason: 'no PBXProject object found'};
+  }
+  const apps = findApplicationTargets(text);
+  if (apps.length === 0) {
+    return {ok: false, reason: 'no application target found'};
+  }
+  let target;
+  if (apps.length === 1) {
+    target = apps[0];
+  } else {
+    const appName = opts.appName;
+    if (appName == null) {
+      return {
+        ok: false,
+        reason: `multiple application targets (${apps
+          .map(a => a.name)
+          .join(', ')}); pass --app-name to disambiguate`,
+      };
+    }
+    target = apps.find(a => a.name === appName);
+    if (target == null) {
+      return {
+        ok: false,
+        reason: `no application target named "${appName}"`,
+      };
+    }
+  }
+  const configUuids = targetBuildConfigUuids(text, target);
+  if (configUuids.length === 0) {
+    return {ok: false, reason: 'could not resolve target build configurations'};
+  }
+  if (configUuids.some(c => configUsesPods(text, c))) {
+    return {
+      ok: false,
+      reason:
+        'target uses CocoaPods (Pods-*.xcconfig) — in-place injection only ' +
+        'supports SPM-only targets',
+    };
+  }
+  // The target's own Frameworks build phase (where product build files link).
+  const buildPhases = findField(text, target, 'buildPhases');
+  const phaseUuids =
+    buildPhases != null
+      ? (buildPhases.value.match(/[0-9A-Fa-f]{24}/g) ?? [])
+      : [];
+  let frameworksPhaseUuid = null;
+  for (const pu of phaseUuids) {
+    const po = findObjectByUuid(text, pu);
+    if (po != null) {
+      const isa = findField(text, po, 'isa');
+      if (isa != null && /PBXFrameworksBuildPhase/.test(isa.value)) {
+        frameworksPhaseUuid = pu;
+        break;
+      }
+    }
+  }
+  if (frameworksPhaseUuid == null) {
+    return {ok: false, reason: 'target has no Frameworks build phase'};
+  }
+  return {
+    ok: true,
+    rootUuid: project.uuid,
+    target,
+    configUuids,
+    frameworksPhaseUuid,
+  };
+}
+
+/**
+ * Splice the SPM dependency graph + React build settings + sync build phase
+ * into `text` and return the modified pbxproj. Pure string transform (no I/O),
+ * idempotent: objects already present (by UUID) and array members / settings
+ * already applied are skipped, so a second run is a no-op.
+ */
+function injectSpmIntoPbxproj(
+  input /*: string */,
+  plan /*: {rootUuid: string, targetUuid: string, configUuids: Array<string>, frameworksPhaseUuid: string} */,
+  reactNativePath /*: string */,
+  remote /*: ?RemoteCfg */,
+) /*: {text: string, injectedUuids: Array<string>} */ {
+  let text = input;
+  const mkUuid = (section /*: string */, id /*: string */) =>
+    namespacedUUID(plan.rootUuid, section, id);
+  const graph = buildSpmDependencyGraph(mkUuid, remote);
+  const entries = spmGraphToEntries(graph);
+  const injectedUuids /*: Array<string> */ = [];
+
+  // 1. Insert the new objects (skip any UUID already present — idempotency).
+  const insertObjects = (
+    sectionName /*: string */,
+    objs /*: $ReadOnlyArray<{+uuid: string, +comment?: ?string, +fields: {+[string]: string}, ...}> */,
+  ) => {
+    const fresh = objs.filter(o => !text.includes(o.uuid));
+    for (const o of objs) {
+      injectedUuids.push(o.uuid);
+    }
+    if (fresh.length === 0) {
+      return;
+    }
+    text = insertObjectsIntoSection(
+      text,
+      sectionName,
+      fresh.map(serializeEntry).join('\n'),
+    );
+  };
+  insertObjects('XCLocalSwiftPackageReference', entries.localRefs);
+  if (entries.remoteRef != null) {
+    insertObjects('XCRemoteSwiftPackageReference', [entries.remoteRef]);
+  }
+  insertObjects('XCSwiftPackageProductDependency', entries.productDeps);
+  insertObjects('PBXBuildFile', entries.buildFiles);
+
+  // 2. packageReferences on the PBXProject.
+  const pkgRefMembers = [
+    ...(graph.remotePkgRef != null
+      ? [{uuid: graph.remotePkgRef.uuid, comment: graph.remotePkgRef.comment}]
+      : []),
+    ...graph.localPkgRefs.map(r => ({uuid: r.uuid, comment: r.comment})),
+  ];
+  const project = findProjectObject(text);
+  if (project != null) {
+    text = addArrayMembers(text, project, 'packageReferences', pkgRefMembers);
+  }
+
+  // 3. packageProductDependencies on the app target.
+  const productMembers = graph.products.map(p => ({
+    uuid: p.depUuid,
+    comment: p.product,
+  }));
+  text = addArrayMembers(
+    text,
+    findApplicationTargetByUuid(text, plan.targetUuid),
+    'packageProductDependencies',
+    productMembers,
+  );
+
+  // 4. product build files into the target's Frameworks phase.
+  const phase = findObjectByUuid(text, plan.frameworksPhaseUuid);
+  if (phase != null) {
+    text = addArrayMembers(
+      text,
+      phase,
+      'files',
+      graph.products.map(p => ({
+        uuid: p.buildFileUuid,
+        comment: `${p.product} in Frameworks`,
+      })),
+    );
+  }
+
+  // 5. React build settings into every build config (Debug + Release).
+  for (const configUuid of plan.configUuids) {
+    text = mergeReactBuildSettings(text, configUuid, reactNativePath);
+  }
+
+  // 6. The Sync SPM Autolinking build phase (safety net; the scheme pre-action
+  //    is what fires before SPM resolution). Prepended so it runs before
+  //    Sources. We do NOT add a JS-bundle phase — an existing app already
+  //    bundles JS via its own phase.
+  const syncScript = buildSyncAutolinkingScript(reactNativePath);
+  const syncPhaseUuid = mkUuid('PBXShellScriptBuildPhase', 'SyncAutolinking');
+  if (!text.includes(syncPhaseUuid)) {
+    text = insertObjectsIntoSection(
+      text,
+      'PBXShellScriptBuildPhase',
+      serializeEntry(
+        shellScriptPhase(syncPhaseUuid, 'Sync SPM Autolinking', syncScript),
+      ),
+    );
+  }
+  injectedUuids.push(syncPhaseUuid);
+  text = addArrayMembers(
+    text,
+    findApplicationTargetByUuid(text, plan.targetUuid),
+    'buildPhases',
+    [{uuid: syncPhaseUuid, comment: 'Sync SPM Autolinking'}],
+    {prepend: true},
+  );
+
+  return {text, injectedUuids};
+}
+
+/** Re-locate an application target by UUID against the current text. */
+function findApplicationTargetByUuid(
+  text /*: string */,
+  targetUuid /*: string */,
+) /*: {uuid: string, bodyOpen: number, bodyClose: number} */ {
+  const obj = findObjectByUuid(text, targetUuid);
+  if (obj == null) {
+    throw new Error(`pbxproj: app target ${targetUuid} disappeared mid-edit`);
+  }
+  return obj;
+}
+
+/** Merge the React build settings into one XCBuildConfiguration's dict. */
+function mergeReactBuildSettings(
+  input /*: string */,
+  configUuid /*: string */,
+  reactNativePath /*: string */,
+) /*: string */ {
+  let text = input;
+  const scalars = [
+    {key: 'CLANG_CXX_LANGUAGE_STANDARD', value: '"c++20"'},
+    {key: 'REACT_NATIVE_PATH', value: quoteIfNeeded(reactNativePath)},
+  ];
+  // Re-locate the buildSettings dict before each edit (offsets shift).
+  const dict = () => {
+    const cfg = findObjectByUuid(text, configUuid);
+    if (cfg == null) {
+      return null;
+    }
+    const bs = findField(text, cfg, 'buildSettings');
+    if (bs == null) {
+      return null;
+    }
+    return {uuid: configUuid, bodyOpen: bs.valueStart, bodyClose: bs.tokenEnd - 1};
+  };
+  for (const {key, values} of INJECTED_ARRAY_SETTINGS) {
+    const d = dict();
+    if (d != null) {
+      text = addArrayStringValues(text, d, key, values);
+    }
+  }
+  for (const {key, value} of scalars) {
+    const d = dict();
+    if (d != null) {
+      text = ensureScalarField(text, d, key, value);
+    }
+  }
+  return text;
+}
+
+// Write only when content changed (avoids spurious Xcode reloads / git churn).
+function writeIfChanged(
+  filePath /*: string */,
+  content /*: string */,
+) /*: boolean */ {
+  fs.mkdirSync(path.dirname(filePath), {recursive: true});
+  try {
+    if (fs.readFileSync(filePath, 'utf8') === content) {
+      return false;
+    }
+  } catch {
+    /* file doesn't exist yet */
+  }
+  fs.writeFileSync(filePath, content, 'utf8');
+  return true;
+}
+
+/**
+ * Add the "Sync SPM Autolinking" pre-action to an existing scheme's
+ * BuildAction, reusing the scheme's own primary BuildableReference. Returns
+ * the XML unchanged when the pre-action is already present.
+ */
+function addPreActionToScheme(
+  xml /*: string */,
+  targetUuid /*: string */,
+  syncScript /*: string */,
+) /*: string */ {
+  if (xml.includes('title = "Sync SPM Autolinking"')) {
+    return xml;
+  }
+  const refMatch = xml.match(
+    new RegExp(
+      `<BuildableReference\\b[^>]*BlueprintIdentifier = "${targetUuid}"[^>]*>`,
+    ),
+  );
+  const attr = (name /*: string */) => {
+    const m =
+      refMatch != null
+        ? refMatch[0].match(new RegExp(`${name} = "([^"]*)"`))
+        : null;
+    return m != null ? m[1] : '';
+  };
+  const cleanRef =
+    `<BuildableReference\n` +
+    `                     BuildableIdentifier = "primary"\n` +
+    `                     BlueprintIdentifier = "${targetUuid}"\n` +
+    `                     BuildableName = "${attr('BuildableName')}"\n` +
+    `                     BlueprintName = "${attr('BlueprintName')}"\n` +
+    `                     ReferencedContainer = "${attr('ReferencedContainer')}">\n` +
+    `                  </BuildableReference>`;
+  const executionAction =
+    `         <ExecutionAction\n` +
+    `            ActionType = "Xcode.IDEStandardExecutionActionsCore.ExecutionActionType.ShellScriptAction">\n` +
+    `            <ActionContent\n` +
+    `               title = "Sync SPM Autolinking"\n` +
+    `               scriptText = "${escapeXmlAttribute(syncScript)}">\n` +
+    `               <EnvironmentBuildable>\n` +
+    `                  ${cleanRef}\n` +
+    `               </EnvironmentBuildable>\n` +
+    `            </ActionContent>\n` +
+    `         </ExecutionAction>`;
+
+  if (/<PreActions>/.test(xml)) {
+    return xml.replace('</PreActions>', `${executionAction}\n      </PreActions>`);
+  }
+  const openEnd = xml.indexOf('>', xml.indexOf('<BuildAction'));
+  if (openEnd < 0) {
+    return xml; // no BuildAction — leave the scheme untouched
+  }
+  const block = `\n      <PreActions>\n${executionAction}\n      </PreActions>`;
+  return xml.slice(0, openEnd + 1) + block + xml.slice(openEnd + 1);
+}
+
+/**
+ * Ensure the app target's shared scheme runs the sync pre-action before SPM
+ * resolution. Updates the scheme that builds the target if one exists,
+ * otherwise creates a fresh shared scheme. Returns 'updated' | 'created' |
+ * 'unchanged'.
+ */
+function injectOrCreateScheme(
+  xcodeprojDir /*: string */,
+  opts /*: {appName: string, targetUuid: string, projName: string, syncScript: string} */,
+) /*: string */ {
+  const schemesDir = path.join(xcodeprojDir, 'xcshareddata', 'xcschemes');
+  let schemeFiles /*: Array<string> */ = [];
+  try {
+    schemeFiles = fs.readdirSync(schemesDir).filter(f => f.endsWith('.xcscheme'));
+  } catch {
+    /* no shared schemes dir yet */
+  }
+  for (const f of schemeFiles) {
+    const p = path.join(schemesDir, f);
+    const xml = fs.readFileSync(p, 'utf8');
+    if (xml.includes(`BlueprintIdentifier = "${opts.targetUuid}"`)) {
+      const updated = addPreActionToScheme(xml, opts.targetUuid, opts.syncScript);
+      return writeIfChanged(p, updated) ? 'updated' : 'unchanged';
+    }
+  }
+  const xml = generateXcscheme(
+    opts.appName,
+    opts.targetUuid,
+    opts.projName,
+    opts.syncScript,
+  );
+  writeIfChanged(path.join(schemesDir, `${opts.appName}.xcscheme`), xml);
+  return 'created';
+}
+
+/**
+ * Add SPM packages to a user's EXISTING xcodeproj in place. Returns
+ * {status: 'injected', target} on success, or {status: 'refused', reason}
+ * when the project can't be safely edited (caller falls back to
+ * generate-from-scratch).
+ */
+function injectSpmIntoExistingXcodeproj(
+  opts /*: {appRoot: string, reactNativeRoot: string, xcodeprojPath: string, appName?: ?string} */,
+) /*: {status: 'injected', target: string} | {status: 'refused', reason: string} */ {
+  const {appRoot, reactNativeRoot, xcodeprojPath} = opts;
+  const pbxprojPath = path.join(xcodeprojPath, 'project.pbxproj');
+  if (!fs.existsSync(pbxprojPath)) {
+    return {status: 'refused', reason: `no project.pbxproj at ${xcodeprojPath}`};
+  }
+  const original = fs.readFileSync(pbxprojPath, 'utf8');
+  const plan = planInjection(original, {appName: opts.appName});
+  if (!plan.ok) {
+    return {status: 'refused', reason: plan.reason};
+  }
+  const reactNativePath = path.relative(appRoot, reactNativeRoot);
+  const remote = remotePackageConfig(appRoot);
+  const {text, injectedUuids} = injectSpmIntoPbxproj(
+    original,
+    {
+      rootUuid: plan.rootUuid,
+      targetUuid: plan.target.uuid,
+      configUuids: plan.configUuids,
+      frameworksPhaseUuid: plan.frameworksPhaseUuid,
+    },
+    reactNativePath,
+    remote,
+  );
+
+  const changed = writeIfChanged(pbxprojPath, text);
+  log(
+    changed
+      ? `Injected SPM packages into ${path.relative(appRoot, pbxprojPath)}`
+      : `${path.relative(appRoot, pbxprojPath)} already up to date`,
+  );
+
+  const projName = path.basename(xcodeprojPath, '.xcodeproj');
+  const schemeResult = injectOrCreateScheme(xcodeprojPath, {
+    appName: plan.target.name,
+    targetUuid: plan.target.uuid,
+    projName,
+    syncScript: buildSyncAutolinkingScript(reactNativePath),
+  });
+  log(`Scheme sync pre-action: ${schemeResult}`);
+
+  // Marker for idempotency + `clean` revert.
+  writeIfChanged(
+    path.join(xcodeprojPath, SPM_INJECTED_MARKER),
+    JSON.stringify(
+      {
+        rootUuid: plan.rootUuid,
+        target: plan.target.name,
+        injectedUuids: Array.from(new Set(injectedUuids)).sort(),
+      },
+      null,
+      2,
+    ) + '\n',
+  );
+
+  ensureStubPackages(appRoot);
+  return {status: 'injected', target: plan.target.name};
+}
+
 function main(argv /*:: ?: Array<string> */) /*: void */ {
   const args = parseArgs(argv ?? process.argv.slice(2));
   const appRoot = path.resolve(args.appRoot);
@@ -1218,23 +1776,6 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
   // shared `<App>.xcodeproj` filename without inspecting pbxproj contents.
   const markerPath = path.join(projDir, SPM_MANAGED_MARKER);
 
-  // Only write files that actually changed to avoid triggering Xcode reloads.
-  function writeIfChanged(
-    filePath /*: string */,
-    content /*: string */,
-  ) /*: boolean */ {
-    fs.mkdirSync(path.dirname(filePath), {recursive: true});
-    try {
-      if (fs.readFileSync(filePath, 'utf8') === content) {
-        return false;
-      }
-    } catch {
-      /* file doesn't exist yet */
-    }
-    fs.writeFileSync(filePath, content, 'utf8');
-    return true;
-  }
-
   const xcworkspaceData = generateXcworkspaceData(projName);
   const xcscheme = generateXcscheme(
     appName,
@@ -1270,5 +1811,12 @@ module.exports = {
   generatePbxproj,
   generateXcscheme,
   ensureStubPackages,
+  buildSpmDependencyGraph,
+  spmGraphToEntries,
+  planInjection,
+  injectSpmIntoPbxproj,
+  injectSpmIntoExistingXcodeproj,
+  addPreActionToScheme,
   SPM_MANAGED_MARKER,
+  SPM_INJECTED_MARKER,
 };
