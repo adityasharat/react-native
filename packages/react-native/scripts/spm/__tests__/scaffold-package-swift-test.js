@@ -172,6 +172,37 @@ describe('translatePodspecToSpmTarget', () => {
     }
   });
 
+  it('flags needsObjCPrefix (and adds "." to the search path) when the target has ObjC(++) sources', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'objc-scaffold-'));
+    try {
+      fs.writeFileSync(path.join(root, 'A.mm'), '');
+      const model = podspec({sourceFiles: ['A.mm', 'B.cpp']});
+      const spec = translatePodspecToSpmTarget(
+        model,
+        autolinkedDep({name: 'react-native-foo', root}),
+      );
+      expect(spec.needsObjCPrefix).toBe(true);
+      expect(spec.headerSearchPaths).toContain('.');
+    } finally {
+      fs.rmSync(root, {recursive: true, force: true});
+    }
+  });
+
+  it('does not flag needsObjCPrefix for a C++-only target', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cpp-scaffold-'));
+    try {
+      fs.writeFileSync(path.join(root, 'A.cpp'), '');
+      const model = podspec({sourceFiles: ['A.cpp']});
+      const spec = translatePodspecToSpmTarget(
+        model,
+        autolinkedDep({name: 'react-native-foo', root}),
+      );
+      expect(spec.needsObjCPrefix).toBe(false);
+    } finally {
+      fs.rmSync(root, {recursive: true, force: true});
+    }
+  });
+
   it('does not add "." for a single-segment header_mappings_dir', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rea-scaffold-'));
     try {
@@ -350,6 +381,7 @@ describe('emitScaffoldedPackageSwift', () => {
       sources: [],
       headerSearchPaths: [],
       preprocessorDefines: [],
+      needsObjCPrefix: false,
       coreReactNative: false,
       siblingNames: [],
       extraFrameworks: [],
@@ -453,6 +485,24 @@ describe('emitScaffoldedPackageSwift', () => {
     expect(out).toContain(
       '.product(name: "ReactNativeWorklets", package: "ReactNativeWorklets")',
     );
+  });
+
+  it('-includes the ObjC prefix header in c/cxx settings when needsObjCPrefix is set', () => {
+    const withPrefix = emitScaffoldedPackageSwift(
+      baseSpec({needsObjCPrefix: true}),
+    );
+    expect(
+      (
+        withPrefix.match(
+          /\.unsafeFlags\(\["-include", "react-native-spm-prefix\.h"\]\)/g,
+        ) ?? []
+      ).length,
+    ).toBe(2); // cSettings + cxxSettings
+    // Not emitted for a C/C++-only target.
+    const noPrefix = emitScaffoldedPackageSwift(
+      baseSpec({needsObjCPrefix: false}),
+    );
+    expect(noPrefix).not.toContain('-include');
   });
 
   it('emits preprocessor defines as .define(...) in c/cxx settings, escaping quoted values and honoring config', () => {
@@ -855,6 +905,7 @@ describe('SCAFFOLDER_VERSION', () => {
       sources: [],
       headerSearchPaths: [],
       preprocessorDefines: [],
+      needsObjCPrefix: false,
       coreReactNative: false,
       siblingNames: [],
       extraFrameworks: [],

@@ -408,6 +408,10 @@ export type SpmScaffoldSpec = {
   // Preprocessor defines (resolved by pod ipc) — emitted as `.define(...)` in
   // cSettings + cxxSettings, honoring any per-config scope.
   preprocessorDefines: Array<PreprocessorDefine>,
+  // True when the target has ObjC(++) sources (.m/.mm). Drives emitting +
+  // `-include`ing a prefix header that ambient-imports Foundation/UIKit (which
+  // CocoaPods provides via a generated prefix.pch and SPM does not).
+  needsObjCPrefix: boolean,
   // Bucketed dependency references — pre-computed by the translation layer.
   // `coreReactNative` is true when ANY React-* / RCT* / RCT-Folly / glog
   // dep is present (so we add a single `.product(name: "ReactNative", ...)`).

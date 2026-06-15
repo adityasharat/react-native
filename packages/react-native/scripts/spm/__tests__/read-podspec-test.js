@@ -237,6 +237,32 @@ describe('flattenSubspecs', () => {
     expect(model.preprocessorDefines).toHaveLength(3);
   });
 
+  it('lifts defines from s.xcconfig too, not just pod_target_xcconfig (reanimated shape)', () => {
+    const raw = {
+      name: 'RNReanimated',
+      version: '4.4.1',
+      // reanimated declares its version define in `s.xcconfig`, not
+      // pod_target_xcconfig (where worklets puts it).
+      xcconfig: {
+        OTHER_CFLAGS: '$(inherited) -DREANIMATED_VERSION=4.4.1',
+      },
+      pod_target_xcconfig: {
+        'GCC_PREPROCESSOR_DEFINITIONS[config=*Debug*]':
+          '$(inherited) HERMES_ENABLE_DEBUGGER=1',
+      },
+    };
+    const model = flattenSubspecs(raw);
+    const byName = Object.fromEntries(
+      model.preprocessorDefines.map(d => [d.name, d]),
+    );
+    expect(byName.REANIMATED_VERSION).toEqual({
+      name: 'REANIMATED_VERSION',
+      value: '4.4.1',
+      config: null,
+    });
+    expect(byName.HERMES_ENABLE_DEBUGGER.config).toBe('debug');
+  });
+
   it('drops non-define flags and unresolved tokens from OTHER_CFLAGS', () => {
     const raw = {
       name: 'foo',

@@ -471,51 +471,64 @@ function flattenSubspecs(rawSpec /*: RawSpec */) /*: PodspecModel */ {
       seen.add(key);
       out.push({name, value, config});
     };
+    // Defines can live in the target xcconfig (pod_target_xcconfig) OR the
+    // aggregate/user xcconfig (`s.xcconfig` / user_target_xcconfig). worklets
+    // puts its version define in pod_target_xcconfig; reanimated puts its in
+    // `s.xcconfig` — scan all three.
+    const XCCONFIG_KEYS = [
+      'pod_target_xcconfig',
+      'xcconfig',
+      'user_target_xcconfig',
+    ];
     for (const layer of layers) {
-      // $FlowFixMe[incompatible-use] layer narrowed from `mixed`
-      const xc =
-        layer != null && typeof layer === 'object'
-          ? layer.pod_target_xcconfig
-          : null;
-      if (xc == null || typeof xc !== 'object') continue;
-      for (const rawKey of Object.keys(xc)) {
-        const cflags = /^OTHER_CFLAGS(?:\[config=\*(\w+)\*\])?$/i.exec(rawKey);
-        const ppDefs =
-          /^GCC_PREPROCESSOR_DEFINITIONS(?:\[config=\*(\w+)\*\])?$/i.exec(
+      if (layer == null || typeof layer !== 'object') continue;
+      for (const xcKey of XCCONFIG_KEYS) {
+        // $FlowFixMe[incompatible-use] layer narrowed from `mixed`
+        const xc = layer[xcKey];
+        if (xc == null || typeof xc !== 'object') continue;
+        for (const rawKey of Object.keys(xc)) {
+          const cflags = /^OTHER_CFLAGS(?:\[config=\*(\w+)\*\])?$/i.exec(
             rawKey,
           );
-        if (cflags == null && ppDefs == null) continue;
-        const cfgRaw = ((cflags?.[1] ?? ppDefs?.[1] ?? '') + '').toLowerCase();
-        const config =
-          cfgRaw === 'debug'
-            ? 'debug'
-            : cfgRaw === 'release'
-              ? 'release'
-              : null;
-        // $FlowFixMe[incompatible-use] xc value access is intentional
-        const val = xc[rawKey];
-        const strs =
-          typeof val === 'string'
-            ? [val]
-            : Array.isArray(val)
-              ? val.filter(v => typeof v === 'string')
-              : [];
-        for (const s of strs) {
-          for (const tok of shellTokenize(s)) {
-            if (tok === '$(inherited)') continue;
-            // OTHER_CFLAGS: only `-D` tokens are defines; others are flags.
-            // GCC_PREPROCESSOR_DEFINITIONS: every token is `NAME[=VALUE]`.
-            let body /*: ?string */ = null;
-            if (cflags != null) {
-              if (tok.startsWith('-D')) body = tok.slice(2);
-            } else {
-              body = tok;
+          const ppDefs =
+            /^GCC_PREPROCESSOR_DEFINITIONS(?:\[config=\*(\w+)\*\])?$/i.exec(
+              rawKey,
+            );
+          if (cflags == null && ppDefs == null) continue;
+          const cfgRaw = (
+            (cflags?.[1] ?? ppDefs?.[1] ?? '') + ''
+          ).toLowerCase();
+          const config =
+            cfgRaw === 'debug'
+              ? 'debug'
+              : cfgRaw === 'release'
+                ? 'release'
+                : null;
+          // $FlowFixMe[incompatible-use] xc value access is intentional
+          const val = xc[rawKey];
+          const strs =
+            typeof val === 'string'
+              ? [val]
+              : Array.isArray(val)
+                ? val.filter(v => typeof v === 'string')
+                : [];
+          for (const s of strs) {
+            for (const tok of shellTokenize(s)) {
+              if (tok === '$(inherited)') continue;
+              // OTHER_CFLAGS: only `-D` tokens are defines; others are flags.
+              // GCC_PREPROCESSOR_DEFINITIONS: every token is `NAME[=VALUE]`.
+              let body /*: ?string */ = null;
+              if (cflags != null) {
+                if (tok.startsWith('-D')) body = tok.slice(2);
+              } else {
+                body = tok;
+              }
+              if (body == null || body.length === 0) continue;
+              const eq = body.indexOf('=');
+              const name = eq >= 0 ? body.slice(0, eq) : body;
+              const value = eq >= 0 ? body.slice(eq + 1) : null;
+              add(name, value, config);
             }
-            if (body == null || body.length === 0) continue;
-            const eq = body.indexOf('=');
-            const name = eq >= 0 ? body.slice(0, eq) : body;
-            const value = eq >= 0 ? body.slice(eq + 1) : null;
-            add(name, value, config);
           }
         }
       }
