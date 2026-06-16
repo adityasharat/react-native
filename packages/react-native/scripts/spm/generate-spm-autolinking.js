@@ -308,6 +308,56 @@ function hasPodspec(absSource /*: string */) /*: boolean */ {
 }
 
 /**
+ * True when a dep has BOTH Swift and C-family (.m/.mm/.c/.cpp) sources. SPM
+ * cannot compile mixed-language sources in a single target, and RN libs that
+ * mix them are typically bidirectionally coupled (ObjC↔Swift) — which can't be
+ * split into two targets either (it would be a circular dependency). So such a
+ * dep is unsupportable by the scaffolder; we surface a clear, distinct error
+ * instead of emitting a manifest that fails with a cryptic SPM resolve error.
+ * Heuristic filesystem scan (bounded depth; skips examples/tests/build noise).
+ */
+function hasMixedLanguageSources(absSource /*: string */) /*: boolean */ {
+  const SKIP /*: Set<string> */ = new Set([
+    'node_modules',
+    'Pods',
+    'build',
+    '.git',
+    '__tests__',
+    'example',
+    'Example',
+    'examples',
+  ]);
+  let hasSwift = false;
+  let hasClang = false;
+  const walk = (dir /*: string */, depth /*: number */) => {
+    if (depth > 6 || (hasSwift && hasClang)) return;
+    let entries /*: Array<{name: string, isDirectory(): boolean}> */;
+    try {
+      // $FlowFixMe[incompatible-type] Dirent typing
+      entries = fs.readdirSync(dir, {withFileTypes: true});
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      // $FlowFixMe[incompatible-type] Dirent.name is string|Buffer in stubs
+      const name /*: string */ = e.name;
+      if (e.isDirectory()) {
+        if (!name.startsWith('.') && !SKIP.has(name)) {
+          walk(path.join(dir, name), depth + 1);
+        }
+      } else if (/\.swift$/i.test(name)) {
+        hasSwift = true;
+      } else if (/\.(mm?|c|cc|cpp|cxx)$/i.test(name)) {
+        hasClang = true;
+      }
+      if (hasSwift && hasClang) return;
+    }
+  };
+  walk(absSource, 0);
+  return hasSwift && hasClang;
+}
+
+/**
  * Error thrown when one or more autolinked community npm deps have no Swift
  * Package Manager manifest (neither a shipped Package.swift nor a scaffolded
  * one). The autolinker no longer silently synthesizes a manifest for these —
@@ -316,9 +366,9 @@ function hasPodspec(absSource /*: string */) /*: boolean */ {
  * (the Xcode build phase keys off it to fail the build).
  */
 class MissingManifestError extends Error {
-  /*:: missingManifests: Array<{name: string, npmName: string, hasPodspec: boolean}>; */
+  /*:: missingManifests: Array<{name: string, npmName: string, hasPodspec: boolean, mixed?: boolean}>; */
   constructor(
-    deps /*: Array<{name: string, npmName: string, hasPodspec: boolean}> */,
+    deps /*: Array<{name: string, npmName: string, hasPodspec: boolean, mixed?: boolean}> */,
   ) {
     super(
       `${deps.length} autolinked native module(s) have no Package.swift. ` +
@@ -336,9 +386,18 @@ class MissingManifestError extends Error {
  * the thrown error never drift.
  */
 function reportMissingManifests(
-  deps /*: Array<{name: string, npmName: string, hasPodspec: boolean}> */,
+  deps /*: Array<{name: string, npmName: string, hasPodspec: boolean, mixed?: boolean}> */,
 ) /*: MissingManifestError */ {
   for (const d of deps) {
+    if (d.mixed === true) {
+      console.error(
+        `error: "${d.npmName}" has mixed Swift + Objective-C/C++ sources, which Swift Package Manager cannot compile in a single target (and its Swift↔ObjC interop typically can't be split into two targets without a circular dependency).\n` +
+          `  • Opt it out of SPM autolinking in your app's react-native.config.js:\n` +
+          `      module.exports = { dependencies: { '${d.npmName}': { platforms: { ios: null } } } };\n` +
+          `  • Or consume ${d.npmName} as a prebuilt binary (xcframework) instead.`,
+      );
+      continue;
+    }
     if (d.hasPodspec) {
       console.error(
         `error: Package.swift is missing for library "${d.npmName}" — it ships no Swift Package Manager support.\n` +
@@ -1188,7 +1247,7 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
   // fail with an actionable message after the classification pass. spmModules
   // (app-local, podspec-less, explicitly declared in react-native.config.js)
   // keep their synth wrappers: there is nothing to scaffold for them.
-  const missingManifests /*: Array<{name: string, npmName: string, hasPodspec: boolean}> */ =
+  const missingManifests /*: Array<{name: string, npmName: string, hasPodspec: boolean, mixed?: boolean}> */ =
     [];
 
   for (const entry of entries) {
@@ -1223,10 +1282,13 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
     }
     if (entry.origin === 'npm') {
       // No shipped or scaffolded manifest — this is the gap we now surface.
+      // A mixed-language dep is reported distinctly (it can't be scaffolded at
+      // all, so "run spm scaffold" would be misleading).
       missingManifests.push({
         name: target.name,
         npmName: entry.npmName ?? target.name,
         hasPodspec: hasPodspec(absSource),
+        mixed: hasMixedLanguageSources(absSource),
       });
       // Drop any stale wrapper from a previous synth-mode run so SPM doesn't
       // resolve against it.
@@ -1551,6 +1613,7 @@ module.exports = {
   expandSpmSourceGlobs,
   findSelfManagedPackageDir,
   hasPodspec,
+  hasMixedLanguageSources,
   MissingManifestError,
   reportMissingManifests,
   AUTOGEN_MARKER,

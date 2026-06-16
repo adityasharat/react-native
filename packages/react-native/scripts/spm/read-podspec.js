@@ -124,8 +124,18 @@ function runPodIpcSpec(podspecPath /*: string */) /*: RawSpec | null */ {
   if (typeof result.stdout !== 'string' || result.stdout.length === 0) {
     return null;
   }
+  // Some podspecs print diagnostics to stdout during evaluation (e.g. skia:
+  // `-- SK_GRAPHITE: OFF ...`) before `pod ipc` emits the JSON. Parsing the
+  // raw stdout then throws and we'd silently fall back to the (much weaker)
+  // regex parser. Extract just the JSON object (first `{` … last `}`).
+  const stdout = result.stdout;
+  const start = stdout.indexOf('{');
+  const end = stdout.lastIndexOf('}');
+  if (start < 0 || end <= start) {
+    return null;
+  }
   try {
-    return JSON.parse(result.stdout);
+    return JSON.parse(stdout.slice(start, end + 1));
   } catch {
     return null;
   }
@@ -420,25 +430,33 @@ function flattenSubspecs(rawSpec /*: RawSpec */) /*: PodspecModel */ {
 
   function mergeHeaderSearchPaths() /*: Array<string> */ {
     const out /*: Array<string> */ = [];
+    // HSP can live in any of the xcconfig blocks, and a single value often
+    // PACKS multiple space-separated paths, each individually quoted, plus a
+    // CocoaPods `/**` recursive-glob suffix (e.g. skia:
+    // `"$(SRCROOT)/cpp/"/** "$(SRCROOT)/cpp/skia" ...`). Shell-tokenize to keep
+    // each path intact, then strip ALL quotes (not just wrapping) per token.
+    const XCCONFIG_KEYS = [
+      'pod_target_xcconfig',
+      'xcconfig',
+      'user_target_xcconfig',
+    ];
     for (const layer of layers) {
-      // $FlowFixMe[incompatible-use] layer narrowed from `mixed`; runtime-validated below
-      const xc =
-        layer != null && typeof layer === 'object'
-          ? layer.pod_target_xcconfig
-          : null;
-      if (xc == null || typeof xc !== 'object') continue;
-      // $FlowFixMe[incompatible-use] xc narrowed from `mixed`; HEADER_SEARCH_PATHS access is intentional
-      const hsp = xc.HEADER_SEARCH_PATHS;
-      if (typeof hsp === 'string') {
-        // Single string — split on whitespace, strip quotes
-        for (const tok of hsp.split(/\s+/)) {
-          if (tok.length > 0) out.push(stripWrappingQuotes(tok));
-        }
-      } else if (Array.isArray(hsp)) {
-        for (const v of hsp) {
-          if (typeof v !== 'string') continue;
-          for (const tok of v.split(/\s+/)) {
-            if (tok.length > 0) out.push(stripWrappingQuotes(tok));
+      if (layer == null || typeof layer !== 'object') continue;
+      for (const xcKey of XCCONFIG_KEYS) {
+        // $FlowFixMe[incompatible-use] layer narrowed from `mixed`
+        const xc = layer[xcKey];
+        if (xc == null || typeof xc !== 'object') continue;
+        const hsp = xc.HEADER_SEARCH_PATHS;
+        const values =
+          typeof hsp === 'string'
+            ? [hsp]
+            : Array.isArray(hsp)
+              ? hsp.filter(v => typeof v === 'string')
+              : [];
+        for (const v of values) {
+          for (const tok of shellTokenize(v)) {
+            const cleaned = tok.replace(/['"]/g, '');
+            if (cleaned.length > 0) out.push(cleaned);
           }
         }
       }

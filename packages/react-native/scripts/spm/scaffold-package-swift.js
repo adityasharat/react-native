@@ -93,7 +93,7 @@ const {log} = makeLogger('scaffold-package-swift');
 // defines from pod_target_xcconfig emitted as `.define(...)`. v13: ObjC(++)
 // targets get an ambient-import prefix header (Foundation/UIKit) `-include`d,
 // replacing CocoaPods' generated prefix.pch.
-const SCAFFOLDER_VERSION = 14;
+const SCAFFOLDER_VERSION = 16;
 const SCAFFOLDER_VERSION_LINE_RE = /^\/\/ AUTO-SCAFFOLDED-VERSION: (\d+)$/m;
 
 const AUTOGEN_MARKER =
@@ -147,6 +147,42 @@ function isReactCoreDep(name /*: string */) /*: boolean */ {
   return REACT_CORE_DEP_PREFIXES.some(p => name.startsWith(p));
 }
 
+// Every subdirectory (relative to depRoot) under depRoot/base, recursively —
+// used to expand a CocoaPods `path/**` recursive header search path into the
+// concrete dirs SPM needs (SPM has no recursive search-path syntax). Skips
+// VCS / build / dependency noise.
+function collectSubdirs(
+  depRoot /*: string */,
+  base /*: string */,
+) /*: Array<string> */ {
+  const SKIP /*: Set<string> */ = new Set([
+    'node_modules',
+    'Pods',
+    'build',
+    '.git',
+  ]);
+  const out /*: Array<string> */ = [];
+  const walk = (absDir /*: string */, relDir /*: string */) => {
+    let entries /*: Array<{name: string, isDirectory(): boolean}> */;
+    try {
+      // $FlowFixMe[incompatible-type] Dirent typing
+      entries = fs.readdirSync(absDir, {withFileTypes: true});
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      // $FlowFixMe[incompatible-type] Dirent.name is string|Buffer in stubs
+      const name /*: string */ = e.name;
+      if (!e.isDirectory() || name.startsWith('.') || SKIP.has(name)) continue;
+      const rel = relDir === '.' ? name : `${relDir}/${name}`;
+      out.push(rel);
+      walk(path.join(absDir, name), rel);
+    }
+  };
+  walk(path.join(depRoot, base), base === '.' ? '.' : base);
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Translation
 // ---------------------------------------------------------------------------
@@ -190,8 +226,13 @@ function translatePodspecToSpmTarget(
   // dep root. Anything we can't substitute is dropped + warned (avoids
   // emitting `$(SOMETHING)` literally into the Swift file).
   const headerSearchPaths /*: Array<string> */ = [];
+  const addSearchPath = (p /*: string */) => {
+    if (p.length > 0 && !headerSearchPaths.includes(p)) {
+      headerSearchPaths.push(p);
+    }
+  };
   for (const raw of model.headerSearchPaths) {
-    const substituted = raw
+    let substituted = raw
       .replace(/\$\(PODS_TARGET_SRCROOT\)/g, '.')
       .replace(/\$\{PODS_TARGET_SRCROOT\}/g, '.');
     if (/\$[({]/.test(substituted)) {
@@ -201,10 +242,22 @@ function translatePodspecToSpmTarget(
       );
       continue;
     }
-    // Strip leading "./" — the emitter prefixes with the target path already.
-    const cleaned = substituted.replace(/^\.\//, '').replace(/^\//, '');
-    if (cleaned.length > 0 && !headerSearchPaths.includes(cleaned)) {
-      headerSearchPaths.push(cleaned);
+    // CocoaPods `path/**` (or `/*`) = recursive search. SPM has no recursive
+    // search-path syntax, so add the base dir + every subdirectory under it.
+    const recursive = /\/\*\*?$/.test(substituted);
+    substituted = substituted
+      .replace(/\/\*\*?$/, '') // strip the glob marker
+      .replace(/\/{2,}/g, '/'); // collapse `cpp//` → `cpp/`
+    // Strip leading "./" (emitter prefixes with the target path) + trailing "/".
+    const base = substituted
+      .replace(/^\.\//, '')
+      .replace(/^\//, '')
+      .replace(/\/$/, '');
+    addSearchPath(base === '' ? '.' : base);
+    if (recursive) {
+      for (const sub of collectSubdirs(dep.root, base === '' ? '.' : base)) {
+        addSearchPath(sub);
+      }
     }
   }
 
@@ -297,6 +350,25 @@ function translatePodspecToSpmTarget(
         `exclude_files filtering failed (${e.message}); keeping all sources.`,
       );
     }
+  }
+
+  // Header-map emulation: CocoaPods builds a header map (USE_HEADERMAP=YES by
+  // default) so a source can `#import "Foo.h"` by bare name regardless of which
+  // subdirectory Foo.h lives in. SPM has no header map, so add every directory
+  // that contains a header to the search path. Covers libs (e.g. svg) that
+  // spread flat-named headers across many subdirs.
+  const headerFiles = expandedSources.filter(f => /\.(h|hh|hpp)$/i.test(f));
+  try {
+    for (const f of expandSpmSourceGlobs(dep.root, model.publicHeaderFiles)) {
+      if (/\.(h|hh|hpp)$/i.test(f)) headerFiles.push(f);
+    }
+  } catch {
+    // public_header_files globbing is best-effort — source_files usually
+    // already covers the headers.
+  }
+  for (const f of headerFiles) {
+    const d = path.posix.dirname(f);
+    addSearchPath(d === '' ? '.' : d);
   }
 
   // ObjC(++) sources may rely on CocoaPods' implicit prefix-header import of
@@ -770,6 +842,33 @@ function scaffoldPackageSwiftForDep(
     dep,
     ctx.podToNpm ?? new Map(),
   );
+
+  // Mixed-language fail-closed: SPM can't compile Swift + C-family in one
+  // target. Don't emit a manifest that would fail with a cryptic "mixed
+  // language source files" resolve error — skip with a clear reason (and remove
+  // any stale scaffolded manifest so the autolinker reports it distinctly and
+  // points the user at opting it out / a binary distribution).
+  const hasSwift = spec.sources.some(f => /\.swift$/i.test(f));
+  const hasClang = spec.sources.some(f => /\.(mm?|c|cc|cpp|cxx)$/i.test(f));
+  if (hasSwift && hasClang) {
+    if (!ctx.dryRun && fs.existsSync(pkgSwiftPath)) {
+      const existing = fs.readFileSync(pkgSwiftPath, 'utf8');
+      if (existing.includes(SCAFFOLDER_MARKER)) {
+        fs.rmSync(pkgSwiftPath, {force: true});
+      }
+    }
+    return {
+      depName,
+      status: 'skipped-mixed-language',
+      reason:
+        'has mixed Swift + Objective-C/C++ sources, which SPM cannot compile ' +
+        'in one target (and the bidirectional ObjC↔Swift interop typical of ' +
+        'such libs cannot be split without a circular dependency). Opt it out ' +
+        "via react-native.config.js (platforms.ios = null) or use a prebuilt " +
+        'xcframework.',
+    };
+  }
+
   // Relative paths into the app, embedded in the scaffolded Package.swift.
   //
   // The manifest is written to <dep.root>/Package.swift, but the autolinker

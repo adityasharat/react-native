@@ -237,6 +237,26 @@ describe('flattenSubspecs', () => {
     expect(model.preprocessorDefines).toHaveLength(3);
   });
 
+  it('parses a multi-path HEADER_SEARCH_PATHS string with embedded quotes + recursive /** (skia shape)', () => {
+    const raw = {
+      name: 'react-native-skia',
+      version: '1.0',
+      pod_target_xcconfig: {
+        HEADER_SEARCH_PATHS:
+          '"$(PODS_TARGET_SRCROOT)/cpp/"/** "$(PODS_TARGET_SRCROOT)/cpp" "$(PODS_TARGET_SRCROOT)/cpp/skia" "$(PODS_TARGET_SRCROOT)/cpp/dawn/include"',
+      },
+    };
+    const model = flattenSubspecs(raw);
+    // Each space-separated, individually-quoted path becomes its own entry
+    // (quotes stripped); the `/**` recursive marker is preserved for translate.
+    expect(model.headerSearchPaths).toEqual([
+      '$(PODS_TARGET_SRCROOT)/cpp//**',
+      '$(PODS_TARGET_SRCROOT)/cpp',
+      '$(PODS_TARGET_SRCROOT)/cpp/skia',
+      '$(PODS_TARGET_SRCROOT)/cpp/dawn/include',
+    ]);
+  });
+
   it('lifts defines from s.xcconfig too, not just pod_target_xcconfig (reanimated shape)', () => {
     const raw = {
       name: 'RNReanimated',

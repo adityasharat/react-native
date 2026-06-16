@@ -18,6 +18,7 @@ const {
   findSelfManagedPackageDir,
   generateAutolinkedPackageSwift,
   generateSynthPackageSwift,
+  hasMixedLanguageSources,
   hasPodspec,
   linkHeaderTree,
   reportMissingManifests,
@@ -871,5 +872,59 @@ describe('MissingManifestError + reportMissingManifests', () => {
     expect(line.startsWith('error: ')).toBe(true);
     expect(line).toContain('no podspec');
     expect(line).toContain('react-native-baz');
+  });
+
+  it('gives a mixed-language dep a DISTINCT error (not "run scaffold") with an opt-out + binary path', () => {
+    reportMissingManifests([
+      {
+        name: 'Screens',
+        npmName: 'react-native-screens',
+        hasPodspec: true,
+        mixed: true,
+      },
+    ]);
+    const line = errSpy.mock.calls[0][0];
+    expect(line.startsWith('error: ')).toBe(true);
+    expect(line).toContain('mixed Swift');
+    // Must NOT tell them to scaffold — scaffolding can't fix mixed-language.
+    expect(line).not.toContain('react-native spm scaffold');
+    // The two real escape hatches:
+    expect(line).toContain('react-native.config.js'); // opt out of autolinking
+    expect(line).toContain('platforms: { ios: null }');
+    expect(line).toContain('xcframework'); // or consume as a prebuilt binary
+  });
+});
+
+describe('hasMixedLanguageSources', () => {
+  let root;
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'spm-mixed-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, {recursive: true, force: true});
+  });
+
+  it('is true when both .swift and .mm exist under the source dir (screens shape)', () => {
+    fs.mkdirSync(path.join(root, 'ios'), {recursive: true});
+    fs.writeFileSync(path.join(root, 'ios', 'RNSScreen.swift'), '');
+    fs.writeFileSync(path.join(root, 'ios', 'RNSScreen.mm'), '');
+    expect(hasMixedLanguageSources(root)).toBe(true);
+  });
+
+  it('is false for a pure-ObjC++ lib (svg/skia shape)', () => {
+    fs.mkdirSync(path.join(root, 'apple'), {recursive: true});
+    fs.writeFileSync(path.join(root, 'apple', 'A.mm'), '');
+    fs.writeFileSync(path.join(root, 'apple', 'B.h'), '');
+    expect(hasMixedLanguageSources(root)).toBe(false);
+  });
+
+  it('ignores .swift that lives only under example/ or __tests__ (not real sources)', () => {
+    fs.mkdirSync(path.join(root, 'ios'), {recursive: true});
+    fs.writeFileSync(path.join(root, 'ios', 'A.mm'), '');
+    fs.mkdirSync(path.join(root, 'example', 'ios'), {recursive: true});
+    fs.writeFileSync(path.join(root, 'example', 'ios', 'App.swift'), '');
+    expect(hasMixedLanguageSources(root)).toBe(false);
   });
 });

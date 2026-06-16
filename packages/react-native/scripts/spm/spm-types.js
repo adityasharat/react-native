@@ -458,6 +458,7 @@ export type ScaffoldResult =
         | 'skipped-no-ios'
         | 'skipped-no-podspec'
         | 'skipped-opt-out'
+        | 'skipped-mixed-language'
         | 'skipped-is-react-native',
       reason: string,
     }

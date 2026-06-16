@@ -172,6 +172,53 @@ describe('translatePodspecToSpmTarget', () => {
     }
   });
 
+  it('header-map emulation: adds every header-containing subdir to the search path (flat-include libs like svg)', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hmap-scaffold-'));
+    try {
+      fs.mkdirSync(path.join(root, 'apple', 'Elements'), {recursive: true});
+      fs.mkdirSync(path.join(root, 'apple', 'Text'), {recursive: true});
+      fs.writeFileSync(path.join(root, 'apple', 'Elements', 'A.h'), '');
+      fs.writeFileSync(path.join(root, 'apple', 'Text', 'B.h'), '');
+      fs.writeFileSync(path.join(root, 'apple', 'C.mm'), '');
+      const model = podspec({
+        sourceFiles: [
+          'apple/Elements/A.h',
+          'apple/Text/B.h',
+          'apple/C.mm',
+        ],
+      });
+      const spec = translatePodspecToSpmTarget(
+        model,
+        autolinkedDep({name: 'react-native-svg', root}),
+      );
+      expect(spec.headerSearchPaths).toContain('apple/Elements');
+      expect(spec.headerSearchPaths).toContain('apple/Text');
+    } finally {
+      fs.rmSync(root, {recursive: true, force: true});
+    }
+  });
+
+  it('expands a recursive `/**` HEADER_SEARCH_PATH into the base dir + all subdirs (skia shape)', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rec-scaffold-'));
+    try {
+      fs.mkdirSync(path.join(root, 'cpp', 'skia', 'include', 'core'), {
+        recursive: true,
+      });
+      const model = podspec({
+        headerSearchPaths: ['$(PODS_TARGET_SRCROOT)/cpp//**'],
+      });
+      const spec = translatePodspecToSpmTarget(
+        model,
+        autolinkedDep({name: 'react-native-skia', root}),
+      );
+      expect(spec.headerSearchPaths).toContain('cpp'); // base
+      expect(spec.headerSearchPaths).toContain('cpp/skia'); // makes <include/core/X.h> resolve
+      expect(spec.headerSearchPaths).toContain('cpp/skia/include/core');
+    } finally {
+      fs.rmSync(root, {recursive: true, force: true});
+    }
+  });
+
   it('flags needsObjCPrefix (and adds "." to the search path) when the target has ObjC(++) sources', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'objc-scaffold-'));
     try {
@@ -642,6 +689,29 @@ end
     // that scan the whole file).
     expect(content.split('\n', 1)[0]).toMatch(/^\/\/ swift-tools-version: /);
     expect(content).toContain(SCAFFOLDER_MARKER);
+  });
+
+  it('skips (does not write) a mixed-language dep — Swift + ObjC(++) cannot share one SPM target', () => {
+    // react-native-screens shape: a single source glob mixing .swift and .mm.
+    const podspecPath = path.join(depRoot, 'react-native-foo.podspec');
+    fs.writeFileSync(
+      podspecPath,
+      `
+Pod::Spec.new do |s|
+  s.name = "react-native-foo"
+  s.version = "1.0"
+  s.source_files = "ios/**/*.{h,m,mm,swift}"
+  s.dependency "React-Core"
+end
+`,
+    );
+    fs.mkdirSync(path.join(depRoot, 'ios'), {recursive: true});
+    fs.writeFileSync(path.join(depRoot, 'ios', 'Foo.swift'), '');
+    fs.writeFileSync(path.join(depRoot, 'ios', 'Foo.mm'), '');
+    const result = scaffoldPackageSwiftForDep(makeDep(), makeCtx());
+    expect(result.status).toBe('skipped-mixed-language');
+    // Fail-closed: no half-baked manifest left behind.
+    expect(fs.existsSync(path.join(depRoot, 'Package.swift'))).toBe(false);
   });
 
   it('computes app paths relative to the libs/<SwiftName> symlink, not dep.root (fresh-resolve correctness)', () => {
