@@ -93,7 +93,7 @@ const {log} = makeLogger('scaffold-package-swift');
 // defines from pod_target_xcconfig emitted as `.define(...)`. v13: ObjC(++)
 // targets get an ambient-import prefix header (Foundation/UIKit) `-include`d,
 // replacing CocoaPods' generated prefix.pch.
-const SCAFFOLDER_VERSION = 16;
+const SCAFFOLDER_VERSION = 17;
 const SCAFFOLDER_VERSION_LINE_RE = /^\/\/ AUTO-SCAFFOLDED-VERSION: (\d+)$/m;
 
 const AUTOGEN_MARKER =
@@ -145,6 +145,24 @@ const REACT_CORE_DEP_PREFIXES = [
 
 function isReactCoreDep(name /*: string */) /*: boolean */ {
   return REACT_CORE_DEP_PREFIXES.some(p => name.startsWith(p));
+}
+
+// True when the dep ships a `codegenConfig` in package.json — RN's standard
+// marker that the library participates in the New Architecture / codegen. Such
+// a lib's Fabric sources include the app-generated component headers
+// (`<react/renderer/components/<name>/ShadowNodes.h>` etc.), which are vended by
+// the per-app React-GeneratedCode package — so it implicitly depends on React
+// core even when its podspec only wires that via `install_modules_dependencies`
+// (which we strip). Safe/quiet: a missing or unparseable package.json → false.
+function depHasCodegenConfig(depRoot /*: string */) /*: boolean */ {
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(depRoot, 'package.json'), 'utf8'),
+    );
+    return pkg != null && pkg.codegenConfig != null;
+  } catch {
+    return false;
+  }
 }
 
 // Every subdirectory (relative to depRoot) under depRoot/base, recursively —
@@ -323,6 +341,23 @@ function translatePodspecToSpmTarget(
         `Unknown dependency "${depName}" — not wired into the scaffolded Package.swift. Edit manually if needed.`,
       );
     }
+  }
+
+  // New-Architecture libraries declare their React-core dependency via the
+  // `install_modules_dependencies(s)` podspec helper (which auto-adds
+  // React-Core / React-RCTFabric / React-Codegen), NOT an explicit
+  // `s.dependency "React-Core"`. We strip that helper when evaluating the
+  // podspec, so the React-core dependency never surfaces in model.dependencies
+  // and `coreReactNative` would stay false. The authoritative, RN-standard
+  // marker for "this lib participates in the New Architecture / codegen" is a
+  // `codegenConfig` block in package.json — when present, the app's codegen has
+  // generated `react/renderer/components/<name>/{ShadowNodes,Props,…}.h` that
+  // the lib's Fabric sources include via angle brackets. Those generated
+  // headers live in the per-app React-GeneratedCode package, so the lib must
+  // depend on it (and, transitively, on React core). Treat codegenConfig as
+  // an implicit React-core dependency.
+  if (!coreReactNative && depHasCodegenConfig(dep.root)) {
+    coreReactNative = true;
   }
 
   // SPM's `sources:` field does NOT accept CocoaPods-style globs — it wants

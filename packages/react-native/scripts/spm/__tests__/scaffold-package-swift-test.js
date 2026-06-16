@@ -321,6 +321,45 @@ describe('translatePodspecToSpmTarget', () => {
     expect(spec.siblingNames).toEqual(['react-native-worklets']);
   });
 
+  it('treats a package.json codegenConfig as an implicit React-core dep (New-Arch libs strip install_modules_dependencies — svg shape)', () => {
+    // svg declares its React-core dep only via install_modules_dependencies(s),
+    // which we strip — so model.dependencies has NO React-Core. The codegenConfig
+    // marker is what tells us it still needs the React-GeneratedCode package.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codegen-dep-'));
+    try {
+      fs.writeFileSync(
+        path.join(root, 'package.json'),
+        JSON.stringify({name: 'react-native-svg', codegenConfig: {name: 'rnsvg'}}),
+      );
+      const model = podspec({dependencies: []}); // nothing explicit
+      const spec = translatePodspecToSpmTarget(
+        model,
+        autolinkedDep({name: 'react-native-svg', root}),
+      );
+      expect(spec.coreReactNative).toBe(true);
+    } finally {
+      fs.rmSync(root, {recursive: true, force: true});
+    }
+  });
+
+  it('does NOT force coreReactNative for a non-codegen dep with no React deps', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'no-codegen-dep-'));
+    try {
+      fs.writeFileSync(
+        path.join(root, 'package.json'),
+        JSON.stringify({name: 'react-native-foo'}), // no codegenConfig
+      );
+      const model = podspec({dependencies: []});
+      const spec = translatePodspecToSpmTarget(
+        model,
+        autolinkedDep({name: 'react-native-foo', root}),
+      );
+      expect(spec.coreReactNative).toBe(false);
+    } finally {
+      fs.rmSync(root, {recursive: true, force: true});
+    }
+  });
+
   it('warns + drops unknown non-RN dependencies (MMKV, AFNetworking)', () => {
     const model = podspec({dependencies: ['MMKV', 'AFNetworking']});
     const spec = translatePodspecToSpmTarget(model, autolinkedDep());
