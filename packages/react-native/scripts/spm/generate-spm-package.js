@@ -224,7 +224,10 @@ ${binaryTargets}
 `;
 }
 
-function main(argv /*:: ?: Array<string> */) /*: void */ {
+function main(
+  argv /*:: ?: Array<string> */,
+  deps /*:: ?: {ensureZeroILayout?: (string, string, string) => {reactXcfw: string, headersXcfw: string}} */,
+) /*: void */ {
   const args = parseArgs(argv ?? process.argv.slice(2));
   // Ensure appRoot is always absolute so path.join/path.resolve produce absolute paths
   // even when called with --app-root . or other relative paths.
@@ -314,8 +317,10 @@ function main(argv /*:: ?: Array<string> */) /*: void */ {
     const rnPkgRoot = path.resolve(__dirname, '..', '..');
     const overrides /*: {[string]: string} */ = {};
     if (raw.ReactNativeHeaders == null) {
-      // $FlowFixMe[cannot-resolve-module] cross-dir require into ios-prebuild
-      const {ensureZeroILayout} = require('../ios-prebuild/zero-i-compose');
+      const ensureZeroILayout =
+        deps?.ensureZeroILayout ??
+        // $FlowFixMe[cannot-resolve-module] cross-dir require into ios-prebuild
+        require('../ios-prebuild/zero-i-compose').ensureZeroILayout;
       const composed = ensureZeroILayout(
         artifactsDir ?? path.dirname(String(raw.React?.xcframeworkPath ?? '')),
         rnPkgRoot,

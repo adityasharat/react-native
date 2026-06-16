@@ -1155,4 +1155,18 @@ module.exports = {
   resolveHermesArtifact,
   REQUIRED_ARTIFACTS,
   validateArtifactsCache,
+  // Exposed for unit tests (pure / fetch-stubbable helpers).
+  rnCoreReleaseUrl,
+  rnDepsReleaseUrl,
+  hermesReleaseUrl,
+  resolveSnapshotUrl,
+  resolveNightlyVersion,
+  resolveLatestV1Version,
+  resolveRNCoreArtifact,
+  resolveRNDepsArtifact,
+  exists,
+  formatBytes,
+  formatSpeed,
+  findFirst,
+  extractXCFramework,
 };

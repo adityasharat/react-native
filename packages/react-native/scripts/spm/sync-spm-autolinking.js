@@ -56,7 +56,51 @@ const yargs = require('yargs');
 
 const {log} = makeLogger('sync-spm-autolinking');
 
-async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
+/**
+ * Pure decision logic for a sync run. Given whether the app is in remote-SPM
+ * mode and whether a local artifacts cache is already present, decide which
+ * side-effecting steps the sync should perform.
+ *
+ *   - Remote mode: SPM resolves artifacts itself — never download, never
+ *     regenerate the local xcframeworks sub-package.
+ *   - Local mode: regenerate the sub-package always; download only when the
+ *     cache slot isn't populated yet.
+ */
+function decideSyncPlan(
+  remote /*: mixed */,
+  hasCachedArtifacts /*: boolean */,
+) /*: {isRemote: boolean, shouldDownload: boolean, shouldGeneratePackage: boolean} */ {
+  const isRemote = remote != null;
+  return {
+    isRemote,
+    shouldDownload: !isRemote && !hasCachedArtifacts,
+    shouldGeneratePackage: !isRemote,
+  };
+}
+
+// Collaborators are injected (with these real implementations as defaults) so
+// main() can be exercised end-to-end in tests without mocking the module
+// system. Tests pass fakes that record calls and point defaultCacheDir at a
+// tempdir; everything fs-based runs for real against that tempdir.
+const defaultDeps = {
+  runCodegenAndInstallTemplate,
+  readPackageJson,
+  resolveCacheSlotVersion,
+  defaultCacheDir,
+  remotePackageConfig,
+  downloadArtifacts,
+  generateAutolinking,
+  generatePackage,
+  installSpmCodegenTemplate,
+  buildPerAppHeaderTree,
+  findProjectRoot,
+};
+
+async function main(
+  argv /*:: ?: Array<string> */,
+  overrides /*:: ?: $Shape<typeof defaultDeps> */,
+) /*: Promise<void> */ {
+  const deps = {...defaultDeps, ...(overrides ?? {})};
   const parsed = yargs(argv ?? process.argv.slice(2))
     .version(false)
     .option('app-root', {
@@ -74,7 +118,7 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
 
   const appRoot = path.resolve(parsed['app-root']);
   const reactNativeRoot = path.resolve(parsed['react-native-root']);
-  const projectRoot = findProjectRoot(appRoot);
+  const projectRoot = deps.findProjectRoot(appRoot);
 
   // The caller (setup-apple-spm.js) already generated autolinking.json before
   // invoking this script, so codegen reuses it here. Defer the codegen template
@@ -82,7 +126,7 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
   // (see installSpmCodegenTemplate call below) — installing it now would write a
   // template that the post-symlink install immediately supersedes.
   try {
-    runCodegenAndInstallTemplate(
+    deps.runCodegenAndInstallTemplate(
       projectRoot,
       appRoot,
       reactNativeRoot,
@@ -95,7 +139,7 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
     log('Codegen failed — continuing with existing output');
   }
 
-  const pkg = readPackageJson(reactNativeRoot);
+  const pkg = deps.readPackageJson(reactNativeRoot);
   const rawVersion = pkg?.version ?? '0.0.0';
   const flavor = 'debug';
 
@@ -103,19 +147,20 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
   // labels this is the actual nightly hash, so we look at the right slot
   // even when package.json still says '1000.0.0'. A new nightly publish
   // means a new slot — old `1000.0.0` slots no longer prevent re-download.
-  const slotVersion = await resolveCacheSlotVersion(rawVersion);
-  const expectedCacheDir = defaultCacheDir(slotVersion, flavor);
+  const slotVersion = await deps.resolveCacheSlotVersion(rawVersion);
+  const expectedCacheDir = deps.defaultCacheDir(slotVersion, flavor);
   const expectedArtifactsJson = path.join(expectedCacheDir, 'artifacts.json');
 
   // Remote SPM package mode: artifacts come from the remote package (SPM
   // resolves + caches them) — no Maven download, no local artifacts package.
-  const remote = remotePackageConfig(appRoot);
+  const remote = deps.remotePackageConfig(appRoot);
+  const plan = decideSyncPlan(remote, fs.existsSync(expectedArtifactsJson));
 
-  if (remote == null && !fs.existsSync(expectedArtifactsJson)) {
+  if (plan.shouldDownload) {
     log(
       `Downloading xcframework artifacts (slot: ${slotVersion}, ${displayPath(expectedCacheDir)})...`,
     );
-    await downloadArtifacts([
+    await deps.downloadArtifacts([
       '--version',
       rawVersion,
       '--flavor',
@@ -123,7 +168,7 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
       '--output',
       expectedCacheDir,
     ]);
-  } else if (remote == null) {
+  } else if (!plan.isRemote) {
     log(
       `Using cached xcframework artifacts (slot: ${slotVersion}, ${displayPath(expectedCacheDir)})`,
     );
@@ -137,16 +182,16 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
   const artifactsDir /*: string */ = expectedCacheDir;
 
   log('Re-generating build/generated/autolinking/Package.swift...');
-  generateAutolinking([
+  deps.generateAutolinking([
     '--app-root',
     appRoot,
     '--react-native-root',
     reactNativeRoot,
   ]);
 
-  if (remote == null) {
+  if (plan.shouldGeneratePackage) {
     log('Re-generating xcframeworks sub-package...');
-    generatePackage([
+    deps.generatePackage([
       '--app-root',
       appRoot,
       '--react-native-root',
@@ -157,14 +202,14 @@ async function main(argv /*:: ?: Array<string> */) /*: Promise<void> */ {
   }
 
   // (Re)install the static codegen template now that build/generated/ios is finalized.
-  installSpmCodegenTemplate(appRoot, reactNativeRoot, {log});
+  deps.installSpmCodegenTemplate(appRoot, reactNativeRoot, {log});
 
   // Rebuild the per-app generated-headers farm (vended as the ReactAppHeaders
   // SPM target inside the codegen package). React core headers need no trees
   // — they live inside the composed artifacts (see generate-spm-package). The
   // generated manifests are fully declarative (fixed-relative package paths),
   // so no path-locator JSON is written.
-  buildPerAppHeaderTree(appRoot, {log});
+  deps.buildPerAppHeaderTree(appRoot, {log});
 
   const stampPath = path.join(
     appRoot,
@@ -193,4 +238,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = {main};
+module.exports = {main, decideSyncPlan};
