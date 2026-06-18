@@ -108,8 +108,8 @@ function replaceRNCoreConfiguration(
       );
     }
 
-    // Delete all directories in finalLocation - not files, since we want to
-    // keep the React-VFS.yaml file
+    // Delete only directories in finalLocation (e.g. the React.xcframework) -
+    // not files, so any sibling files written during pod install are preserved.
     const dirs = fs
       .readdirSync(finalLocation, {withFileTypes: true})
       .filter(dirent => dirent.isDirectory());
