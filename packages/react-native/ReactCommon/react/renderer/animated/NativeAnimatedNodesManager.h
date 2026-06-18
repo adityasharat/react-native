@@ -22,6 +22,7 @@
 #include <react/renderer/core/ReactPrimitives.h>
 #include <react/renderer/core/ShadowNode.h>
 #include <react/renderer/uimanager/UIManagerAnimationBackend.h>
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -298,7 +299,9 @@ class NativeAnimatedNodesManager : public std::enable_shared_from_this<NativeAni
   bool warnedAboutGraphTraversal_ = false;
 #endif
 
-  CallbackId animationBackendCallbackId_{0};
+  // Render callback registered with the shared AnimationBackend (0 == none).
+  static constexpr CallbackId kRenderCallbackNotStarted = 0;
+  std::atomic<CallbackId> animationBackendCallbackId_{kRenderCallbackNotStarted};
 
   friend class ColorAnimatedNode;
   friend class AnimationDriver;

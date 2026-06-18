@@ -551,32 +551,35 @@ NativeAnimatedNodesManager::ensureEventEmitterListener() noexcept {
 }
 
 void NativeAnimatedNodesManager::startRenderCallbackIfNeeded(bool isAsync) {
-  // This method can be called from either the UI thread or JavaScript thread.
-  // It ensures `startOnRenderCallback_` is called exactly once using atomic
-  // operations. We use std::atomic_bool rather than std::mutex to avoid
-  // potential deadlocks that could occur if we called external code while
-  // holding a mutex.
+  // Called from either the UI thread or the JavaScript thread.
+  if (useSharedAnimatedBackend_) {
+    if (animationBackendCallbackId_.load() != kRenderCallbackNotStarted) {
+      return;
+    }
+    auto animationBackend = animationBackend_.lock();
+    if (!animationBackend) {
+      return;
+    }
+    auto weak = weak_from_this();
+    auto callbackId = animationBackend->start(
+        [weak](AnimationTimestamp timestamp) -> AnimationMutations {
+          if (auto self = weak.lock()) {
+            return self->pullAnimationMutations(timestamp);
+          }
+          return {};
+        });
+    auto expected = kRenderCallbackNotStarted;
+    if (!animationBackendCallbackId_.compare_exchange_strong(
+            expected, callbackId)) {
+      animationBackend->stop(callbackId);
+    }
+    return;
+  }
+
   auto isRenderCallbackStarted = isRenderCallbackStarted_.exchange(true);
   if (isRenderCallbackStarted) {
-    // onRender callback is already started.
     return;
   }
-
-  if (useSharedAnimatedBackend_) {
-    if (auto animationBackend = animationBackend_.lock()) {
-      auto weak = weak_from_this();
-      animationBackendCallbackId_ = animationBackend->start(
-          [weak](AnimationTimestamp timestamp) -> AnimationMutations {
-            if (auto self = weak.lock()) {
-              return self->pullAnimationMutations(timestamp);
-            }
-            return {};
-          });
-    }
-
-    return;
-  }
-
   if (startOnRenderCallback_) {
     startOnRenderCallback_([this]() { onRender(); }, isAsync);
   }
@@ -584,21 +587,18 @@ void NativeAnimatedNodesManager::startRenderCallbackIfNeeded(bool isAsync) {
 
 void NativeAnimatedNodesManager::stopRenderCallbackIfNeeded(
     bool isAsync) noexcept {
-  // When multiple threads reach this point, only one thread should call
-  // stopOnRenderCallback_. This synchronization is primarily needed during
-  // destruction of NativeAnimatedNodesManager. In normal operation,
-  // stopRenderCallbackIfNeeded is always called from the UI thread.
-  auto isRenderCallbackStarted = isRenderCallbackStarted_.exchange(false);
-
   if (useSharedAnimatedBackend_) {
-    if (isRenderCallbackStarted) {
+    auto callbackId =
+        animationBackendCallbackId_.exchange(kRenderCallbackNotStarted);
+    if (callbackId != kRenderCallbackNotStarted) {
       if (auto animationBackend = animationBackend_.lock()) {
-        animationBackend->stop(animationBackendCallbackId_);
+        animationBackend->stop(callbackId);
       }
     }
     return;
   }
 
+  auto isRenderCallbackStarted = isRenderCallbackStarted_.exchange(false);
   if (isRenderCallbackStarted) {
     if (stopOnRenderCallback_) {
       stopOnRenderCallback_(isAsync);

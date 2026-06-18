@@ -80,7 +80,8 @@ class AnimationBackend : public UIManagerAnimationBackend {
   std::weak_ptr<UIManager> uiManager_;
   std::shared_ptr<CallInvoker> jsInvoker_;
   bool isRenderCallbackStarted_{false};
-  CallbackId nextCallbackId_{0};
+  // Starts at 1 so 0 can be used as a "no callback" sentinel by callers.
+  CallbackId nextCallbackId_{1};
   std::mutex mutex_;
 };
 } // namespace facebook::react
